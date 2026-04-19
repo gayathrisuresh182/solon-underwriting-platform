@@ -1,0 +1,592 @@
+# ═══════════════════════════════════════════════════════════════════════
+# Mini Hammurabi -- Underwriting Rules v2
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Changes from v1:
+# - Increased CC6.1 exception weight (access control = #1 breach cause per DBIR)
+# - Added compliance framework trigger rules (HIPAA, PCI-DSS, GDPR)
+# - Added license risk rule from GitHub analysis (GPL/AGPL = legal risk)
+# - Tightened auto-bind: requires > 60% coverage (was 50%)
+# - Added commit trend declining rule
+# - Adjusted stage weights based on actuarial data
+# ═══════════════════════════════════════════════════════════════════════
+
+version: "v2"
+base_risk_score: 25
+
+rules:
+
+  # ──────────────────────────────────────────────────────────────────
+  # Category: DATA HANDLING
+  # ──────────────────────────────────────────────────────────────────
+
+  - id: pii_no_soc2
+    name: "PII Without SOC-2"
+    description: "Company handles PII but has no SOC-2 certification"
+    category: data_handling
+    conditions:
+      all:
+        - field: handles_pii
+          op: eq
+          value: true
+        - field: has_soc2
+          op: ne
+          value: true
+    effects:
+      risk_points: 22
+      flags: ["pii_unprotected"]
+      required_coverages: ["cyber_liability"]
+
+  - id: pii_no_mfa
+    name: "PII Without MFA"
+    description: "Handles PII but MFA is not enforced per security posture"
+    category: data_handling
+    conditions:
+      all:
+        - field: handles_pii
+          op: eq
+          value: true
+        - field: security_posture
+          op: json_field
+          path: "mfa_enforced"
+          value: false
+    effects:
+      risk_points: 18
+      flags: ["mfa_missing"]
+      required_coverages: ["cyber_liability"]
+
+  - id: pii_no_encryption
+    name: "PII Without Encryption"
+    description: "Handles PII but data is not encrypted at rest"
+    category: data_handling
+    conditions:
+      all:
+        - field: handles_pii
+          op: eq
+          value: true
+        - field: security_posture
+          op: json_field
+          path: "encryption_at_rest"
+          value: false
+    effects:
+      risk_points: 15
+      flags: ["encryption_missing"]
+      required_coverages: ["cyber_liability", "data_breach"]
+
+  - id: phi_handling
+    name: "PHI Data Handling"
+    description: "Company handles Protected Health Information"
+    category: data_handling
+    conditions:
+      any:
+        - field: data_types_handled
+          op: contains
+          value: "PHI"
+        - field: industry
+          op: in
+          value: ["Healthcare", "Healthcare Technology", "Health Tech", "healthtech"]
+    effects:
+      risk_points: 10
+      required_coverages: ["cyber_liability", "hipaa_compliance"]
+
+  # ──────────────────────────────────────────────────────────────────
+  # Category: PAYMENT PROCESSING
+  # ──────────────────────────────────────────────────────────────────
+
+  - id: payments_no_soc2
+    name: "Payments Without SOC-2"
+    description: "Processes payments without SOC-2 certification"
+    category: payment_processing
+    conditions:
+      all:
+        - field: handles_payments
+          op: eq
+          value: true
+        - field: has_soc2
+          op: ne
+          value: true
+    effects:
+      risk_points: 25
+      flags: ["payments_unprotected"]
+      required_coverages: ["cyber_liability", "financial_crime"]
+      human_review_trigger: true
+
+  - id: payments_with_soc2
+    name: "Payments With SOC-2"
+    description: "Processes payments and has SOC-2 -- moderate risk"
+    category: payment_processing
+    conditions:
+      all:
+        - field: handles_payments
+          op: eq
+          value: true
+        - field: has_soc2
+          op: eq
+          value: true
+    effects:
+      risk_points: 8
+      required_coverages: ["cyber_liability"]
+
+  - id: payments_no_security_scanning
+    name: "Payments Without Security Scanning"
+    description: "Handles payments but no automated security scanning detected"
+    category: payment_processing
+    conditions:
+      all:
+        - field: handles_payments
+          op: eq
+          value: true
+        - field: has_security_scanning
+          op: ne
+          value: true
+    effects:
+      risk_points: 10
+      flags: ["no_security_scanning"]
+
+  # ──────────────────────────────────────────────────────────────────
+  # Category: AI PRODUCT RISKS
+  # ──────────────────────────────────────────────────────────────────
+
+  - id: ai_product
+    name: "AI in Product"
+    description: "Uses AI/ML in the product -- triggers tech E&O and AI liability"
+    category: ai_product
+    conditions:
+      all:
+        - field: uses_ai_in_product
+          op: eq
+          value: true
+    effects:
+      risk_points: 14
+      required_coverages: ["tech_eo", "ai_liability"]
+      flags: ["ai_exposure"]
+
+  - id: ai_handles_phi
+    name: "AI Handles PHI"
+    description: "AI product that handles health data -- highest liability tier"
+    category: ai_product
+    conditions:
+      all:
+        - field: uses_ai_in_product
+          op: eq
+          value: true
+        - field: data_types_handled
+          op: contains
+          value: "PHI"
+    effects:
+      risk_points: 15
+      required_coverages: ["tech_eo", "ai_liability", "hipaa_compliance"]
+      flags: ["ai_phi_exposure"]
+      human_review_trigger: true
+
+  # ──────────────────────────────────────────────────────────────────
+  # Category: COMPLIANCE FRAMEWORK TRIGGERS (NEW in v2)
+  # ──────────────────────────────────────────────────────────────────
+
+  - id: hipaa_detected
+    name: "HIPAA Applicability Detected"
+    description: "Healthcare industry or PHI handling triggers HIPAA requirements"
+    category: compliance
+    conditions:
+      any:
+        - field: industry
+          op: in
+          value: ["healthtech", "healthcare", "Health Tech", "telemedicine", "digital health"]
+        - field: data_types_handled
+          op: contains
+          value: "PHI"
+    effects:
+      risk_points: 5
+      required_coverages: ["cyber_liability", "tech_eo"]
+      flags: ["hipaa_applicable"]
+
+  - id: pcidss_detected
+    name: "PCI-DSS Applicability Detected"
+    description: "Payment handling triggers PCI-DSS compliance requirements"
+    category: compliance
+    conditions:
+      all:
+        - field: handles_payments
+          op: eq
+          value: true
+    effects:
+      risk_points: 3
+      required_coverages: ["cyber_liability"]
+      flags: ["pcidss_applicable"]
+
+  - id: gdpr_detected
+    name: "GDPR Applicability Detected"
+    description: "International scope or EU presence triggers GDPR requirements"
+    category: compliance
+    conditions:
+      any:
+        - field: geographic_scope
+          op: in
+          value: ["international", "EU + US", "global", "EU", "Europe"]
+    effects:
+      risk_points: 5
+      required_coverages: ["cyber_liability", "tech_eo"]
+      flags: ["gdpr_applicable"]
+
+  # ──────────────────────────────────────────────────────────────────
+  # Category: COMPANY STAGE
+  # ──────────────────────────────────────────────────────────────────
+
+  - id: stage_pre_seed
+    name: "Pre-Seed Stage"
+    description: "Pre-seed companies have highest uncertainty and failure risk"
+    category: stage
+    conditions:
+      all:
+        - field: stage
+          op: in
+          value: ["Pre-Seed", "pre-seed", "Pre-seed"]
+    effects:
+      risk_points: 18
+
+  - id: stage_seed
+    name: "Seed Stage"
+    description: "Seed-stage companies have elevated uncertainty"
+    category: stage
+    conditions:
+      all:
+        - field: stage
+          op: in
+          value: ["Seed", "seed"]
+    effects:
+      risk_points: 10
+      flags: ["early_stage"]
+
+  - id: stage_series_a
+    name: "Series A"
+    description: "Series A -- moderate maturity"
+    category: stage
+    conditions:
+      all:
+        - field: stage
+          op: in
+          value: ["Series A", "series-a", "Series-A", "series a"]
+    effects:
+      risk_points: 5
+
+  - id: stage_growth
+    name: "Growth Stage"
+    description: "Growth or later stage -- risk reduction"
+    category: stage
+    conditions:
+      all:
+        - field: stage
+          op: in
+          value: ["Series B", "Series C", "Series D", "Growth", "Late Stage", "series-b", "series-c"]
+    effects:
+      risk_points: -5
+
+  # ──────────────────────────────────────────────────────────────────
+  # Category: SOC-2 FINDINGS
+  # ──────────────────────────────────────────────────────────────────
+
+  - id: soc2_qualified_opinion
+    name: "Qualified SOC-2 Opinion"
+    description: "Auditor issued a qualified opinion -- significant control failures"
+    category: soc2_findings
+    conditions:
+      all:
+        - field: audit_opinion
+          op: eq
+          value: "qualified"
+    effects:
+      risk_points: 25
+      flags: ["qualified_opinion"]
+      human_review_trigger: true
+
+  - id: soc2_qualified_plus_phi
+    name: "Qualified Opinion + PHI"
+    description: "Qualified SOC-2 AND handles PHI -- decline trigger"
+    category: soc2_findings
+    conditions:
+      all:
+        - field: audit_opinion
+          op: eq
+          value: "qualified"
+        - field: data_types_handled
+          op: contains
+          value: "PHI"
+    effects:
+      risk_points: 10
+      flags: ["qualified_phi"]
+      decline_trigger: true
+
+  - id: soc2_exceptions_moderate
+    name: "SOC-2 Exceptions (1-2)"
+    description: "One or two exceptions found -- minor risk increase"
+    category: soc2_findings
+    conditions:
+      all:
+        - field: exception_count
+          op: gte
+          value: 1
+        - field: exception_count
+          op: lte
+          value: 2
+    effects:
+      risk_points: 10
+
+  - id: soc2_exceptions_high
+    name: "SOC-2 Exceptions (3+)"
+    description: "Three or more exceptions -- significant control weaknesses"
+    category: soc2_findings
+    conditions:
+      all:
+        - field: exception_count
+          op: gte
+          value: 3
+    effects:
+      risk_points: 18
+      flags: ["many_exceptions"]
+      human_review_trigger: true
+
+  - id: soc2_unqualified_clean
+    name: "Clean SOC-2 Opinion"
+    description: "Unqualified opinion with no exceptions -- risk reduction"
+    category: soc2_findings
+    conditions:
+      all:
+        - field: audit_opinion
+          op: eq
+          value: "unqualified"
+        - field: exception_count
+          op: eq
+          value: 0
+    effects:
+      risk_points: -10
+      flags: ["clean_soc2"]
+
+  # ──────────────────────────────────────────────────────────────────
+  # Category: ENGINEERING MATURITY
+  # ──────────────────────────────────────────────────────────────────
+
+  - id: eng_maturity_low
+    name: "Low Engineering Maturity"
+    description: "GitHub engineering maturity score below 0.3"
+    category: engineering_maturity
+    conditions:
+      all:
+        - field: engineering_maturity_score
+          op: lt
+          value: 0.3
+        - field: engineering_maturity_score
+          op: present
+    effects:
+      risk_points: 15
+      flags: ["low_eng_maturity"]
+
+  - id: eng_maturity_medium
+    name: "Medium Engineering Maturity"
+    description: "GitHub engineering maturity 0.3-0.6"
+    category: engineering_maturity
+    conditions:
+      all:
+        - field: engineering_maturity_score
+          op: gte
+          value: 0.3
+        - field: engineering_maturity_score
+          op: lt
+          value: 0.6
+    effects:
+      risk_points: 5
+
+  - id: eng_maturity_high
+    name: "High Engineering Maturity"
+    description: "GitHub engineering maturity above 0.6 -- strong practices"
+    category: engineering_maturity
+    conditions:
+      all:
+        - field: engineering_maturity_score
+          op: gte
+          value: 0.6
+    effects:
+      risk_points: -8
+      flags: ["strong_engineering"]
+
+  - id: no_ci_cd
+    name: "No CI/CD Detected"
+    description: "No continuous integration or deployment pipeline found"
+    category: engineering_maturity
+    conditions:
+      all:
+        - field: has_ci_cd
+          op: eq
+          value: false
+        - field: has_ci_cd
+          op: present
+    effects:
+      risk_points: 8
+      flags: ["no_ci_cd"]
+
+  - id: no_security_policy
+    name: "No Security Policy"
+    description: "No SECURITY.md or published security disclosure policy"
+    category: engineering_maturity
+    conditions:
+      all:
+        - field: has_security_policy
+          op: eq
+          value: false
+        - field: has_security_policy
+          op: present
+    effects:
+      risk_points: 5
+
+  # ──────────────────────────────────────────────────────────────────
+  # Category: LICENSE RISK (NEW in v2)
+  # ──────────────────────────────────────────────────────────────────
+
+  - id: copyleft_license_risk
+    name: "Copyleft License Risk"
+    description: "GPL/AGPL licensed repos in a commercial product -- legal risk"
+    category: license_risk
+    conditions:
+      all:
+        - field: _has_copyleft_license
+          op: eq
+          value: true
+    effects:
+      risk_points: 8
+      flags: ["copyleft_risk"]
+      required_coverages: ["tech_eo"]
+
+  # ──────────────────────────────────────────────────────────────────
+  # Category: COMMIT TREND (NEW in v2)
+  # ──────────────────────────────────────────────────────────────────
+
+  - id: declining_commits
+    name: "Declining Commit Activity"
+    description: "Engineering activity declining -- potential team attrition"
+    category: engineering_maturity
+    conditions:
+      all:
+        - field: commit_trend
+          op: eq
+          value: "declining"
+    effects:
+      risk_points: 5
+      flags: ["declining_activity"]
+
+  # ──────────────────────────────────────────────────────────────────
+  # Category: SOURCE CONFLICTS
+  # ──────────────────────────────────────────────────────────────────
+
+  - id: conflicts_present
+    name: "Unresolved Source Conflicts"
+    description: "Multiple extraction sources disagree on one or more fields"
+    category: source_quality
+    conditions:
+      all:
+        - field: _conflict_count
+          op: gt
+          value: 0
+    effects:
+      risk_points: 5
+      flags: ["has_conflicts"]
+
+  - id: many_conflicts
+    name: "Many Source Conflicts"
+    description: "3+ fields have conflicting values across sources"
+    category: source_quality
+    conditions:
+      all:
+        - field: _conflict_count
+          op: gte
+          value: 3
+    effects:
+      risk_points: 10
+      flags: ["many_conflicts"]
+      human_review_trigger: true
+
+  # ──────────────────────────────────────────────────────────────────
+  # Category: COVERAGE GAPS
+  # ──────────────────────────────────────────────────────────────────
+
+  - id: low_coverage
+    name: "Low Field Coverage"
+    description: "Less than 60% of risk-relevant fields are populated"
+    category: coverage_gaps
+    conditions:
+      all:
+        - field: _coverage_score
+          op: lt
+          value: 0.6
+    effects:
+      risk_points: 12
+      flags: ["low_coverage"]
+      human_review_trigger: true
+
+  - id: critical_fields_missing
+    name: "Critical Fields Missing"
+    description: "Industry or company name is missing"
+    category: coverage_gaps
+    conditions:
+      any:
+        - field: company_name
+          op: missing
+        - field: industry
+          op: missing
+    effects:
+      risk_points: 15
+      flags: ["critical_missing"]
+      human_review_trigger: true
+
+  - id: missing_business_risk_data
+    name: "Missing Business Risk Data"
+    description: "No pitch deck -- cannot determine PII/payment handling or business stage"
+    category: coverage_gaps
+    conditions:
+      all:
+        - field: handles_pii
+          op: missing
+        - field: handles_payments
+          op: missing
+        - field: stage
+          op: missing
+    effects:
+      risk_points: 10
+      flags: ["no_business_data"]
+      human_review_trigger: true
+
+  - id: no_security_data
+    name: "No Security Data Available"
+    description: "Neither SOC-2 nor GitHub security info available"
+    category: coverage_gaps
+    conditions:
+      all:
+        - field: has_soc2
+          op: ne
+          value: true
+        - field: has_security_scanning
+          op: ne
+          value: true
+        - field: audit_opinion
+          op: missing
+    effects:
+      risk_points: 15
+      flags: ["no_security_data"]
+      required_coverages: ["cyber_liability"]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Decision policy -- TIGHTENED in v2
+# ═══════════════════════════════════════════════════════════════════════
+
+decision_policy:
+  auto_bind_max_score: 50
+  decline_min_score: 90
+  auto_bind_blocked_by_flags:
+    - "qualified_phi"
+    - "pii_unprotected"
+    - "payments_unprotected"
+    - "critical_missing"
+    - "low_coverage"
+  decline_flags:
+    - "qualified_phi"
+  # v2: require > 60% weighted coverage for auto-bind
+  min_coverage_for_auto_bind: 0.6

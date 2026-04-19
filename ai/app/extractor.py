@@ -23,15 +23,13 @@ import time
 from typing import Any
 
 import fitz
-from openai import AsyncOpenAI
 from PIL import Image
 from pydantic import BaseModel, field_validator
 
+from . import llm_client
 from .prompts import EXTRACTION_PROMPT, PAGE_EXTRACTION_SCHEMA, PROMPT_VERSION, SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
-
-_client: AsyncOpenAI | None = None
 
 BOOL_FIELDS = {"handles_pii", "handles_payments", "uses_ai_in_product", "has_soc2"}
 INT_FIELDS = {"headcount"}
@@ -44,13 +42,6 @@ _IMAGE_TOKENS_HIGH = 765  # 1024x1024 high detail
 _IMAGE_TOKENS_LOW = 85
 
 _TEXT_THRESHOLD_FOR_LOW_DETAIL = 200
-
-
-def _get_client() -> AsyncOpenAI:
-    global _client
-    if _client is None:
-        _client = AsyncOpenAI()
-    return _client
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -143,10 +134,9 @@ async def _extract_page(
     cost_info: dict[str, Any] = {"detail": detail, "image_tokens": image_tokens}
 
     try:
-        resp = await oai.chat.completions.create(
-            model="gpt-4o",
+        llm_resp = await llm_client.complete(
+            system=SYSTEM_PROMPT,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
                 {
                     "role": "user",
                     "content": [
@@ -164,19 +154,21 @@ async def _extract_page(
             response_format=PAGE_EXTRACTION_SCHEMA,
             temperature=0.1,
             max_tokens=2000,
+            require_vision=True,
         )
 
-        usage = resp.usage
-        if usage:
-            cost_info["prompt_tokens"] = usage.prompt_tokens
-            cost_info["completion_tokens"] = usage.completion_tokens
-            cost_info["cost_usd"] = round(
-                (usage.prompt_tokens * _INPUT_COST_PER_M
-                 + usage.completion_tokens * _OUTPUT_COST_PER_M) / 1_000_000,
-                6,
-            )
+        cost_info["prompt_tokens"] = llm_resp.prompt_tokens
+        cost_info["completion_tokens"] = llm_resp.completion_tokens
+        cost_info["model_used"] = llm_resp.model_used
+        cost_info["provider"] = llm_resp.provider
+        cost_info["fallback_used"] = llm_resp.fallback_used
+        cost_info["cost_usd"] = round(
+            (llm_resp.prompt_tokens * _INPUT_COST_PER_M
+             + llm_resp.completion_tokens * _OUTPUT_COST_PER_M) / 1_000_000,
+            6,
+        )
 
-        raw = resp.choices[0].message.content or "{}"
+        raw = llm_resp.content or "{}"
         data = json.loads(raw)
 
         # #5: Pydantic validation

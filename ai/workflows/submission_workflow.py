@@ -24,6 +24,13 @@ _EXTRACTOR_FOR_TYPE = {
     "github_repo": analyze_github_repo,
 }
 
+# Per-source-type timeout tuning
+_TIMEOUTS = {
+    "pitch_deck": timedelta(minutes=3),     # GPT-4o vision per page
+    "soc2_report": timedelta(minutes=5),    # longer docs, two-pass
+    "github_repo": timedelta(seconds=90),   # API calls, rate limit delays
+}
+
 
 @workflow.defn
 class SubmissionWorkflow:
@@ -63,13 +70,12 @@ class SubmissionWorkflow:
                 file_path=source.get("file_path"),
                 url=source.get("url"),
             )
+            timeout = _TIMEOUTS.get(source["source_type"], timedelta(minutes=3))
             extraction_coros.append(
                 workflow.execute_activity(
                     extractor,
                     inp,
-                    start_to_close_timeout=timedelta(minutes=5)
-                    if source["source_type"] != "github_repo"
-                    else timedelta(minutes=3),
+                    start_to_close_timeout=timeout,
                     retry_policy=retry,
                 )
             )

@@ -40,6 +40,12 @@ coverage_types:
     typical_limits: "$1M per claim"
     key_risk_factors: ["has_retirement_plan", "headcount", "benefit_plan_assets"]
 
+  media_liability:
+    full_name: "Media Liability Insurance"
+    description: "Covers claims from content publication — defamation, copyright, privacy"
+    typical_limits: "$1M per claim / $2M aggregate"
+    key_risk_factors: ["user_generated_content", "advertising", "publishing"]
+
 risk_stages:
   pre_seed:
     typical_headcount: "1-5"
@@ -64,3 +70,151 @@ risk_stages:
     typical_revenue: "$10M+"
     risk_profile: "Significant exposure, enterprise customers, regulatory scrutiny"
     recommended_coverages: ["gl", "cyber", "d_and_o", "tech_eo", "epli", "fiduciary"]
+
+# ═══════════════════════════════════════════════════════════════════════
+# Compliance framework mappings (#1)
+# ═══════════════════════════════════════════════════════════════════════
+
+compliance_frameworks:
+  HIPAA:
+    full_name: "Health Insurance Portability and Accountability Act"
+    requirements:
+      - "Encryption of PHI at rest and in transit"
+      - "Access controls with unique user identification"
+      - "Audit controls and activity logging"
+      - "Breach notification within 60 days"
+      - "Business Associate Agreements (BAA) with all vendors"
+      - "Annual risk assessments"
+      - "Workforce training on privacy and security"
+    mandatory_controls: ["encryption_at_rest", "encryption_in_transit", "mfa_enforced", "access_reviews", "has_incident_response"]
+    affected_coverages: ["cyber", "tech_eo"]
+    triggering_conditions:
+      industries: ["healthtech", "healthcare", "health tech", "telemedicine", "digital health"]
+      data_types: ["PHI", "protected health information", "patient data", "medical records"]
+    penalty_risk: "Up to $1.5M per violation category per year; criminal penalties possible"
+
+  PCI-DSS:
+    full_name: "Payment Card Industry Data Security Standard"
+    requirements:
+      - "Cardholder data protection and encryption"
+      - "Network security (firewalls, segmentation)"
+      - "Access control with least privilege"
+      - "Regular vulnerability scanning and pen testing"
+      - "Incident response plan for card data breaches"
+      - "Logging and monitoring of all access to cardholder data"
+    mandatory_controls: ["encryption_at_rest", "encryption_in_transit", "has_pen_testing", "has_incident_response"]
+    affected_coverages: ["cyber"]
+    triggering_conditions:
+      industries: ["fintech", "e-commerce", "ecommerce", "payments", "financial services"]
+      data_types: ["PCI", "cardholder data", "credit card", "payment card"]
+      fields: {"handles_payments": true}
+    penalty_risk: "$5,000 to $100,000 per month in non-compliance fines"
+
+  SOX:
+    full_name: "Sarbanes-Oxley Act"
+    requirements:
+      - "Internal controls over financial reporting (ICFR)"
+      - "Audit trails for all financial transactions"
+      - "CEO/CFO certification of financial statements"
+      - "Independent audit committee oversight"
+      - "Whistleblower protection mechanisms"
+    mandatory_controls: ["access_reviews", "has_backup_recovery"]
+    affected_coverages: ["d_and_o", "fiduciary"]
+    triggering_conditions:
+      industries: ["public company", "pre-ipo"]
+      data_types: ["financial records", "accounting data"]
+      fields: {"stage": "growth"}
+    penalty_risk: "Up to $5M fine and 20 years imprisonment for willful violations"
+
+  GDPR:
+    full_name: "General Data Protection Regulation"
+    requirements:
+      - "Lawful basis for data processing"
+      - "Data subject rights (access, rectification, erasure, portability)"
+      - "Data Protection Officer (DPO) appointment for large-scale processing"
+      - "Breach notification to supervisory authority within 72 hours"
+      - "Data Protection Impact Assessments (DPIA) for high-risk processing"
+      - "Cross-border data transfer safeguards (SCCs, adequacy decisions)"
+      - "Privacy by design and by default"
+    mandatory_controls: ["encryption_at_rest", "encryption_in_transit", "has_incident_response", "access_reviews"]
+    affected_coverages: ["cyber", "tech_eo"]
+    triggering_conditions:
+      industries: []
+      data_types: ["PII", "personal data", "EU personal data"]
+      fields: {"geographic_scope": "international"}
+    penalty_risk: "Up to 4% of global annual turnover or EUR 20M, whichever is higher"
+
+# ═══════════════════════════════════════════════════════════════════════
+# Coverage recommendation matrix (#3)
+# ═══════════════════════════════════════════════════════════════════════
+
+coverage_recommendations:
+  - id: fintech_payments
+    profile:
+      industry_keywords: ["fintech", "payments", "financial services", "banking", "neobank"]
+      handles_payments: true
+    mandatory: ["cyber", "tech_eo", "gl"]
+    recommended: ["d_and_o", "epli"]
+    optional: ["fiduciary"]
+    reasoning: "Fintech with payments requires cyber and tech E&O minimum. D&O recommended for funded startups. PCI-DSS compliance likely required."
+
+  - id: healthtech_pii
+    profile:
+      industry_keywords: ["healthtech", "healthcare", "health tech", "telemedicine", "digital health"]
+      handles_pii: true
+    mandatory: ["cyber", "tech_eo", "gl", "epli"]
+    recommended: ["d_and_o"]
+    optional: ["fiduciary", "media_liability"]
+    reasoning: "HIPAA-regulated entities need comprehensive cyber + employment practices coverage. Tech E&O covers software failures affecting patient care."
+
+  - id: saas_b2b
+    profile:
+      industry_keywords: ["saas", "software", "enterprise software", "developer tools"]
+      b2b_or_b2c: "B2B"
+    mandatory: ["cyber", "tech_eo", "gl"]
+    recommended: ["d_and_o", "epli"]
+    optional: ["fiduciary"]
+    reasoning: "B2B SaaS companies face tech E&O exposure from enterprise contracts. Cyber covers data they process for clients."
+
+  - id: saas_b2c
+    profile:
+      industry_keywords: ["saas", "software", "consumer app", "social"]
+      b2b_or_b2c: "B2C"
+    mandatory: ["cyber", "gl"]
+    recommended: ["tech_eo", "d_and_o"]
+    optional: ["epli", "media_liability"]
+    reasoning: "B2C SaaS faces higher volume of consumer data breach exposure. Media liability if user-generated content involved."
+
+  - id: marketplace
+    profile:
+      industry_keywords: ["marketplace", "platform", "gig economy", "two-sided"]
+    mandatory: ["cyber", "gl", "tech_eo"]
+    recommended: ["d_and_o", "epli"]
+    optional: ["fiduciary", "media_liability"]
+    reasoning: "Marketplaces face dual liability — both supply and demand side. GL covers physical interactions; tech E&O covers platform failures."
+
+  - id: ai_ml_company
+    profile:
+      industry_keywords: ["artificial intelligence", "machine learning", "ai", "ml", "deep learning"]
+      uses_ai_in_product: true
+    mandatory: ["cyber", "tech_eo", "gl"]
+    recommended: ["d_and_o", "epli"]
+    optional: ["media_liability"]
+    reasoning: "AI companies face emerging liability from model outputs — hallucinations, bias, IP infringement. Tech E&O is critical."
+
+  - id: ecommerce
+    profile:
+      industry_keywords: ["e-commerce", "ecommerce", "retail tech", "online retail", "dtc"]
+      handles_payments: true
+    mandatory: ["cyber", "gl", "tech_eo"]
+    recommended: ["d_and_o", "epli"]
+    optional: ["media_liability"]
+    reasoning: "E-commerce handles payment data (PCI-DSS) and customer PII. GL covers product liability claims."
+
+  - id: logistics
+    profile:
+      industry_keywords: ["logistics", "supply chain", "shipping", "freight", "fleet"]
+    mandatory: ["gl", "cyber"]
+    recommended: ["tech_eo", "d_and_o"]
+    optional: ["epli", "fiduciary"]
+    reasoning: "Logistics has significant GL exposure from physical operations. Cyber needed if managing shipping/tracking data."

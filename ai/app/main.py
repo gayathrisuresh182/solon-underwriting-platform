@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -14,7 +15,7 @@ from .extractor import extract_from_pdf
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[2] / ".env")
 logging.basicConfig(level=logging.INFO)
 
-app = FastAPI(title="Mini Hammurabi AI Service", version="0.2.0")
+app = FastAPI(title="Mini Hammurabi AI Service", version="0.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -47,7 +48,7 @@ async def extract(file: UploadFile = File(...)):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# pgvector document query endpoint (#13)
+# pgvector document query endpoint
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -72,3 +73,68 @@ async def query_document(query: DocumentQuery):
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
 
     return {"source_id": query.source_id, "question": query.question, "results": results}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Workflow status API (#8)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+async def _get_temporal_client():
+    from temporalio.client import Client
+    address = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
+    return await Client.connect(address)
+
+
+@app.get("/submission/{submission_id}/status")
+async def get_submission_status(submission_id: str):
+    """Query the Temporal workflow for current submission status."""
+    try:
+        client = await _get_temporal_client()
+        handle = client.get_workflow_handle(f"submission-{submission_id}")
+        status = await handle.query("get_status")
+        desc = await handle.describe()
+
+        elapsed_seconds = None
+        started_at = None
+        if desc.start_time:
+            started_at = desc.start_time.isoformat()
+            import datetime
+            elapsed_seconds = int(
+                (datetime.datetime.now(datetime.timezone.utc) - desc.start_time).total_seconds()
+            )
+
+        return {
+            "submission_id": submission_id,
+            "status": status,
+            "started_at": started_at,
+            "elapsed_seconds": elapsed_seconds,
+        }
+    except Exception as e:
+        error_msg = str(e).lower()
+        if "not found" in error_msg or "no rows" in error_msg:
+            raise HTTPException(status_code=404, detail=f"Workflow not found for submission {submission_id}")
+        raise HTTPException(status_code=500, detail=f"Status query failed: {str(e)}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Human review approval endpoint (#9)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@app.post("/submission/{submission_id}/approve")
+async def approve_submission(submission_id: str):
+    """Send the approve_human_review signal to the Temporal workflow."""
+    try:
+        client = await _get_temporal_client()
+        handle = client.get_workflow_handle(f"submission-{submission_id}")
+
+        from workflows.submission_workflow import SubmissionWorkflow
+        await handle.signal(SubmissionWorkflow.approve_human_review)
+
+        return {"status": "approved", "submission_id": submission_id}
+    except Exception as e:
+        error_msg = str(e).lower()
+        if "not found" in error_msg or "no rows" in error_msg:
+            raise HTTPException(status_code=404, detail=f"Workflow not found for submission {submission_id}")
+        raise HTTPException(status_code=500, detail=f"Approval failed: {str(e)}")

@@ -29,7 +29,6 @@ import time
 from typing import Any
 
 import fitz
-from openai import AsyncOpenAI
 from PIL import Image
 
 from .soc2_prompts import (
@@ -48,16 +47,9 @@ from .soc2_prompts import (
     TESTING_SUMMARY_SCHEMA,
 )
 
+from . import llm_client
+
 logger = logging.getLogger(__name__)
-
-_client: AsyncOpenAI | None = None
-
-
-def _get_client() -> AsyncOpenAI:
-    global _client
-    if _client is None:
-        _client = AsyncOpenAI()
-    return _client
 
 
 # ── Page type taxonomy ─────────────────────────────────────────────────
@@ -143,12 +135,10 @@ def _classify_page(text: str, page_num: int, total_pages: int) -> tuple[str, flo
 
 async def _llm_classify_page(text: str) -> tuple[str, float]:
     """Use GPT-4o-mini to classify an ambiguous page. Cost ~$0.0005."""
-    oai = _get_client()
     try:
-        resp = await oai.chat.completions.create(
-            model="gpt-4o-mini",
+        llm_resp = await llm_client.complete(
+            system="You classify SOC-2 report pages into content categories.",
             messages=[
-                {"role": "system", "content": "You classify SOC-2 report pages into content categories."},
                 {"role": "user", "content": CLASSIFICATION_PROMPT.format(
                     page_text=text[:2000]
                 )},
@@ -157,8 +147,7 @@ async def _llm_classify_page(text: str) -> tuple[str, float]:
             temperature=0.0,
             max_tokens=200,
         )
-        raw = resp.choices[0].message.content or "{}"
-        data = json.loads(raw)
+        data = json.loads(llm_resp.content or "{}")
         page_type = data.get("page_type", "narrative")
         confidence = float(data.get("confidence", 0.5))
         if page_type not in PAGE_TYPES:
@@ -267,12 +256,8 @@ async def _call_vision(
     schema: dict,
     page_text: str | None = None,
 ) -> dict | None:
-    """Send a page to GPT-4o with structured output schema.
-
-    For dual-input pages, page_text is included alongside the image.
-    """
+    """Send a page to GPT-4o with structured output schema via unified client."""
     b64 = _image_to_base64(img)
-    oai = _get_client()
 
     content: list[dict] = [{"type": "text", "text": prompt}]
     content.append({
@@ -281,18 +266,15 @@ async def _call_vision(
     })
 
     try:
-        resp = await oai.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": SOC2_SYSTEM_PROMPT},
-                {"role": "user", "content": content},
-            ],
+        llm_resp = await llm_client.complete(
+            system=SOC2_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": content}],
             response_format=schema,
             temperature=0.1,
             max_tokens=3000,
+            require_vision=True,
         )
-        raw = resp.choices[0].message.content or "{}"
-        return json.loads(raw)
+        return json.loads(llm_resp.content or "{}")
     except json.JSONDecodeError:
         logger.warning("GPT-4o returned malformed JSON")
         return None
