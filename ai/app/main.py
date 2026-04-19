@@ -138,3 +138,36 @@ async def approve_submission(submission_id: str):
         if "not found" in error_msg or "no rows" in error_msg:
             raise HTTPException(status_code=404, detail=f"Workflow not found for submission {submission_id}")
         raise HTTPException(status_code=500, detail=f"Approval failed: {str(e)}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Start Temporal workflow endpoint
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class StartWorkflowRequest(BaseModel):
+    submission_id: str
+    sources: list[dict]
+
+
+@app.post("/start-workflow")
+async def start_workflow(req: StartWorkflowRequest):
+    """Start the SubmissionWorkflow in Temporal."""
+    try:
+        client = await _get_temporal_client()
+        from workflows.submission_workflow import SubmissionWorkflow
+
+        handle = await client.start_workflow(
+            SubmissionWorkflow.run,
+            args=[req.submission_id, req.sources],
+            id=f"submission-{req.submission_id}",
+            task_queue="submission-pipeline",
+        )
+
+        return {
+            "workflow_id": handle.id,
+            "submission_id": req.submission_id,
+            "status": "started",
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to start workflow: {str(e)}")
