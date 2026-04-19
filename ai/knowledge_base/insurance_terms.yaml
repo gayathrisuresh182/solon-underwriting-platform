@@ -1,0 +1,66 @@
+# Insurance domain terminology for extraction augmentation
+
+coverage_types:
+  gl:
+    full_name: "Commercial General Liability"
+    abbreviation: "CGL"
+    description: "Covers third-party bodily injury and property damage claims"
+    typical_limits: "$1M per occurrence / $2M aggregate"
+    key_risk_factors: ["physical operations", "customer-facing product", "events/conferences"]
+
+  cyber:
+    full_name: "Cyber Liability Insurance"
+    description: "Covers data breaches, network security failures, and privacy violations"
+    typical_limits: "$1M per occurrence / $2M aggregate"
+    key_risk_factors: ["handles_pii", "handles_payments", "no_soc2", "no_mfa", "no_encryption"]
+
+  tech_eo:
+    full_name: "Technology Errors & Omissions"
+    abbreviation: "Tech E&O"
+    description: "Covers claims arising from failure of technology products or services"
+    typical_limits: "$1M per claim / $2M aggregate"
+    key_risk_factors: ["b2b_enterprise", "ai_in_product", "critical_infrastructure", "high_revenue"]
+
+  d_and_o:
+    full_name: "Directors & Officers Liability"
+    abbreviation: "D&O"
+    description: "Protects company officers and directors from personal liability in lawsuits"
+    typical_limits: "$1M per claim / $1M aggregate"
+    key_risk_factors: ["funding_stage", "board_size", "regulatory_exposure", "public_statements"]
+
+  epli:
+    full_name: "Employment Practices Liability Insurance"
+    description: "Covers employment-related claims including discrimination, harassment, wrongful termination"
+    typical_limits: "$1M per claim / $1M aggregate"
+    key_risk_factors: ["headcount", "geographic_scope", "remote_workforce", "contractor_usage"]
+
+  fiduciary:
+    full_name: "Fiduciary Liability Insurance"
+    description: "Covers breaches of fiduciary duty related to employee benefit plans"
+    typical_limits: "$1M per claim"
+    key_risk_factors: ["has_retirement_plan", "headcount", "benefit_plan_assets"]
+
+risk_stages:
+  pre_seed:
+    typical_headcount: "1-5"
+    typical_revenue: "$0"
+    risk_profile: "Low exposure but high uncertainty"
+    recommended_coverages: ["gl", "cyber"]
+
+  seed:
+    typical_headcount: "3-15"
+    typical_revenue: "$0 - $1M"
+    risk_profile: "Growing exposure, limited operational history"
+    recommended_coverages: ["gl", "cyber", "d_and_o"]
+
+  series_a:
+    typical_headcount: "15-50"
+    typical_revenue: "$1M - $10M"
+    risk_profile: "Meaningful exposure, expanding customer base"
+    recommended_coverages: ["gl", "cyber", "d_and_o", "tech_eo", "epli"]
+
+  series_b_plus:
+    typical_headcount: "50-200"
+    typical_revenue: "$10M+"
+    risk_profile: "Significant exposure, enterprise customers, regulatory scrutiny"
+    recommended_coverages: ["gl", "cyber", "d_and_o", "tech_eo", "epli", "fiduciary"]

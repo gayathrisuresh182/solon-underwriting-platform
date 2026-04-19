@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+python-multipart
+openai
+pymupdf
+Pillow
+python-dotenv
+pyyaml
+reportlab
+temporalio>=1.7.0
+psycopg2-binary
