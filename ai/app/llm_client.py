@@ -2,9 +2,9 @@
 Unified multi-provider LLM client with automatic fallback.
 
 Provider chain:
-  Primary:   OpenAI GPT-4o
+  Primary:   OpenAI GPT-4o-mini (200K TPM — avoids rate limits for vision)
   Fallback 1: Anthropic Claude (claude-sonnet-4-20250514)
-  Fallback 2: OpenAI GPT-4o-mini
+  Fallback 2: OpenAI GPT-4o
 
 Supports both text-only and vision calls. Tracks which model actually
 succeeded in the response metadata.
@@ -40,7 +40,7 @@ class LLMResponse:
 _PROVIDERS = [
     {
         "name": "openai",
-        "model": "gpt-4o",
+        "model": "gpt-4o-mini",
         "vision": True,
         "env_key": "OPENAI_API_KEY",
     },
@@ -52,7 +52,7 @@ _PROVIDERS = [
     },
     {
         "name": "openai",
-        "model": "gpt-4o-mini",
+        "model": "gpt-4o",
         "vision": True,
         "env_key": "OPENAI_API_KEY",
     },
@@ -212,7 +212,7 @@ async def complete(
 ) -> LLMResponse:
     """Call the LLM with automatic provider fallback.
 
-    Tries primary (GPT-4o) -> fallback 1 (Claude) -> fallback 2 (GPT-4o-mini).
+    Tries primary (GPT-4o-mini) -> fallback 1 (Claude) -> fallback 2 (GPT-4o).
     Returns LLMResponse with model_used and fallback_used metadata.
     """
     errors: list[str] = []

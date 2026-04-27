@@ -1,5 +1,14 @@
 import asyncio
 import os
+import sys
+
+# Ensure ai/ is on sys.path and .env is loaded before anything else
+_AI_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _AI_DIR not in sys.path:
+    sys.path.insert(0, _AI_DIR)
+
+from dotenv import load_dotenv
+load_dotenv(os.path.join(_AI_DIR, "..", ".env"))
 
 from temporalio.client import Client
 from temporalio.worker import Worker

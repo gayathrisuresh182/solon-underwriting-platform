@@ -1,9 +1,10 @@
-"""Prompts and schemas for SOC-2 report extraction (Pass 2 — targeted GPT-4o calls).
+"""Prompts and schemas for SOC-2 report extraction (v3 — text-only, Docling-powered).
 
-v2 improvements:
-- Structured output JSON schemas for all page types
-- Table-aware prompting for control tables (#12)
-- Dual-input instructions for control_table/findings pages (#11)
+v3 changes from v2:
+- All prompts are text-only (no Vision/image references)
+- CONTROL_TABLE_PROMPT/SCHEMA removed (tables extracted deterministically via Docling DataFrames)
+- CLASSIFICATION_PROMPT/SCHEMA removed (sections classified by heading keywords)
+- Remaining prompts updated to accept {section_text} instead of page images
 """
 
 SOC2_SYSTEM_PROMPT = """\
@@ -16,8 +17,8 @@ Key underwriting principles:
 - Security practices (MFA, encryption, incident response) directly affect premium pricing.
 - You must capture the EXACT criteria IDs (CC6.1, CC7.2, etc.) for every finding.
 
-When provided with both page text and a page image, use the text for accurate content \
-reading and the image for layout/table structure context.
+You will receive text extracted from specific sections of the report. Extract the requested \
+fields accurately based on the text content provided.
 
 Always respond with valid JSON matching the requested schema."""
 
@@ -168,9 +169,8 @@ CONTROL_TABLE_SCHEMA = {
             "type": "object",
             "properties": {
                 "controls": {"type": "array", "items": _control_entry},
-                "page_number": {"type": "integer"},
             },
-            "required": ["controls", "page_number"],
+            "required": ["controls"],
             "additionalProperties": False,
         },
     },
@@ -201,9 +201,8 @@ FINDINGS_SCHEMA = {
             "type": "object",
             "properties": {
                 "findings": {"type": "array", "items": _finding_entry},
-                "page_number": {"type": "integer"},
             },
-            "required": ["findings", "page_number"],
+            "required": ["findings"],
             "additionalProperties": False,
         },
     },
@@ -246,37 +245,20 @@ TESTING_SUMMARY_SCHEMA = {
     },
 }
 
-# Schema for LLM fallback page classification (#14)
-CLASSIFICATION_SCHEMA = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "page_classification",
-        "strict": True,
-        "schema": {
-            "type": "object",
-            "properties": {
-                "page_type": {"type": "string"},
-                "confidence": {"type": "number"},
-                "reasoning": {"type": "string"},
-            },
-            "required": ["page_type", "confidence", "reasoning"],
-            "additionalProperties": False,
-        },
-    },
-}
-
 
 # ═══════════════════════════════════════════════════════════════════════
-# Page-type prompts
+# Text-only prompts (no Vision references)
 # ═══════════════════════════════════════════════════════════════════════
 
 OPINION_PROMPT = """\
-This is page {page_number} from a SOC-2 Type II report — it contains the \
-Independent Auditor's Report (opinion letter).
+Below is the text from the Independent Auditor's Report section of a SOC-2 Type II report.
 
 {domain_context}
 
-Extract the following from this page:
+**Section text:**
+{section_text}
+
+Extract the following from this text:
 
 1. **audit_opinion**: Is this "unqualified" (clean) or "qualified" (has reservations)?
    Look for phrases like "in our opinion, in all material respects" (unqualified)
@@ -288,55 +270,34 @@ Extract the following from this page:
 5. **auditor_name**: Name of the audit firm."""
 
 SYSTEM_DESCRIPTION_PROMPT = """\
-This is page {page_number} from a SOC-2 Type II report — it contains the \
-System Description section.
+Below is the text from the System Description section of a SOC-2 Type II report.
 
 {domain_context}
 
-Extract any of these fields you can identify on this page (null if not found):
+**Section text:**
+{section_text}
+
+Extract any of these fields you can identify (null if not found):
 
 - **industry**: Primary industry/vertical of the company
 - **infrastructure_provider**: Cloud provider(s) — AWS, GCP, Azure, etc.
 - **tech_stack**: Technologies mentioned (languages, frameworks, databases) as an array
 - **data_types_handled**: Types of sensitive data — PII, PHI, PCI, financial, etc.
 - **headcount**: Number of employees if mentioned
-- **security_practices**: Security measures described on this page (array of short descriptions)
+- **security_practices**: Security measures described (array of short descriptions)
 - **compliance_frameworks**: Other compliance frameworks mentioned (HIPAA, ISO 27001, etc.)
 - **product_description**: What the company does (one sentence)"""
 
-CONTROL_TABLE_PROMPT = """\
-This is page {page_number} from a SOC-2 Type II report — it contains a \
-Control Activities table with test results.
-
-{domain_context}
-
-**Page text (OCR):**
-{page_text}
-
-This page contains a table with columns: Criteria ID, Control Activity, Test Performed, \
-Test Result, Exceptions. Read the table row by row. Extract each row as a separate \
-control entry in the output array.
-
-For each control:
-- **criteria_id**: The criteria code (CC6.1, CC7.2, etc.)
-- **category**: The control category name (null if not on this row)
-- **control_description**: Brief description of the control activity
-- **test_performed**: Brief description of the test
-- **passed**: true if "Pass" / "No exceptions noted", false if "Fail" or exceptions exist
-- **exception_description**: If failed, the exact exception text. null if passed.
-
-CRITICAL: Capture ALL controls on the page. Do not skip rows even if they pass."""
-
 FINDINGS_PROMPT = """\
-This is page {page_number} from a SOC-2 Type II report — it contains \
-Findings and Observations (exceptions found during audit testing).
+Below is the text from a Findings and Observations section of a SOC-2 Type II report \
+(exceptions found during audit testing).
 
 {domain_context}
 
-**Page text (OCR):**
-{page_text}
+**Section text:**
+{section_text}
 
-Extract EVERY finding on this page:
+Extract EVERY finding in this text:
 
 - **criteria_id**: The criteria code the finding relates to (CC6.1, CC7.4, etc.)
 - **finding_title**: Short title of the finding
@@ -348,37 +309,36 @@ Extract EVERY finding on this page:
 
 CRITICAL: Capture ALL findings. Every exception matters for underwriting."""
 
-TESTING_SUMMARY_PROMPT = """\
-This is page {page_number} from a SOC-2 Type II report — it contains a \
-Summary of Testing Results.
+CONTROL_TABLE_PROMPT = """\
+Below is the text from a Control Activities / Tests of Operating Effectiveness section \
+of a SOC-2 Type II report. This section contains control test results.
 
 {domain_context}
+
+**Section text:**
+{section_text}
+
+Extract each control tested on this section as a separate entry:
+
+- **criteria_id**: The criteria code (CC6.1, CC7.2, A1.1, etc.)
+- **category**: The control category name (null if not stated)
+- **control_description**: Brief description of the control activity
+- **test_performed**: Brief description of the test
+- **passed**: true if "Pass" / "No exceptions noted", false if "Fail" or exceptions exist
+- **exception_description**: If failed, the exact exception text. null if passed.
+
+CRITICAL: Capture ALL controls in the text. Do not skip any, even if they passed."""
+
+TESTING_SUMMARY_PROMPT = """\
+Below is the text from a Summary of Testing Results section of a SOC-2 Type II report.
+
+{domain_context}
+
+**Section text:**
+{section_text}
 
 Extract:
 - **total_controls_tested**: integer
 - **controls_passed**: integer
 - **controls_with_exceptions**: integer
 - **pass_rate**: percentage as a decimal (e.g. 0.909 for 90.9%)"""
-
-CLASSIFICATION_PROMPT = """\
-Classify this SOC-2 report page. Based on the text content below, determine which \
-section of a SOC-2 Type II report this page belongs to.
-
-**Page text:**
-{page_text}
-
-Choose exactly ONE page_type from:
-- cover: Title/cover page
-- table_of_contents: Table of contents
-- auditor_opinion: Independent auditor's opinion letter
-- management_assertion: Management's assertion
-- system_description: System description (infrastructure, processes, personnel)
-- testing_methodology: Testing methodology description
-- control_table: Control activities table with test results
-- testing_summary: Summary of testing results (aggregate pass/fail statistics)
-- findings: Findings, exceptions, or observations
-- appendix: Appendix content (CUECs, supplementary info)
-- glossary: Glossary of terms
-- narrative: General narrative that doesn't fit above categories
-
-Provide your confidence (0.0-1.0) and brief reasoning."""

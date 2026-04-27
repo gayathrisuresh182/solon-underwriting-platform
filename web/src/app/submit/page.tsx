@@ -2,7 +2,10 @@
 
 import { useCallback, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Upload, Github, ShieldCheck, FileText, CheckCircle2, Loader2, AlertCircle, ArrowRight } from "lucide-react";
+import {
+  Upload, Github, ShieldCheck, FileText, CheckCircle2,
+  Loader2, AlertCircle, ArrowRight, X,
+} from "lucide-react";
 
 type SourceStatus = "empty" | "uploaded" | "entered" | "ready";
 
@@ -27,6 +30,7 @@ export default function SubmitPage() {
 
   const hasAnySrc = sources.pitchDeck.file || sources.github.url.trim() || sources.soc2.file;
   const canSubmit = companyName.trim() && hasAnySrc && !submitting;
+  const readySources = [sources.pitchDeck.status, sources.github.status, sources.soc2.status].filter(s => s === "ready").length;
 
   const handlePitchDeck = useCallback((file: File) => {
     if (!file.name.toLowerCase().endsWith(".pdf")) return;
@@ -40,7 +44,18 @@ export default function SubmitPage() {
 
   const handleGithubUrl = useCallback((url: string) => {
     const valid = /^https?:\/\/(www\.)?github\.com\/[\w-]+/i.test(url);
-    setSources((s) => ({ ...s, github: { url, status: url.trim() ? (valid ? "ready" : "entered") : "empty" } }));
+    setSources((s) => ({
+      ...s,
+      github: { url, status: url.trim() ? (valid ? "ready" : "entered") : "empty" },
+    }));
+  }, []);
+
+  const clearPitchDeck = useCallback(() => {
+    setSources((s) => ({ ...s, pitchDeck: { file: null, status: "empty" } }));
+  }, []);
+
+  const clearSoc2 = useCallback(() => {
+    setSources((s) => ({ ...s, soc2: { file: null, status: "empty" } }));
   }, []);
 
   const handleSubmit = async () => {
@@ -69,55 +84,57 @@ export default function SubmitPage() {
   };
 
   return (
-    <div className="mx-auto max-w-3xl px-6 py-10">
-      <div className="mb-8">
-        <h1 className="text-2xl font-bold text-slate-900">New Submission</h1>
-        <p className="mt-1 text-sm text-slate-500">
-          Upload documents and provide sources for underwriting analysis.
+    <div className="mx-auto max-w-2xl px-6 py-12">
+      <div className="mb-10">
+        <h1 className="text-3xl font-bold text-navy-900">New Submission</h1>
+        <p className="mt-2 text-base text-slate-500">
+          Provide company details and upload documents for AI-powered risk assessment.
         </p>
       </div>
 
-      {/* Company Name */}
-      <div className="mb-8">
-        <label className="mb-2 block text-sm font-medium text-slate-700">Company Name</label>
+      <div className="mb-10">
+        <label className="mb-2 block text-sm font-semibold text-navy-800">
+          Company Name
+        </label>
         <input
           type="text"
           value={companyName}
           onChange={(e) => setCompanyName(e.target.value)}
-          placeholder="e.g., Coinbase, HealthPulse"
-          className="w-full rounded-lg border border-slate-300 px-4 py-3 text-lg font-medium text-slate-900 placeholder-slate-400 transition-colors focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+          placeholder="e.g., Coinbase, Stripe, HealthPulse"
+          className="input-field text-lg font-medium"
         />
       </div>
 
-      {/* Source Cards */}
-      <div className="mb-8 space-y-4">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-500">Sources</h2>
+      <div className="mb-10 space-y-4">
+        <div className="flex items-center justify-between">
+          <h2 className="section-title">Data Sources</h2>
+          {readySources > 0 && (
+            <span className="rounded-full bg-brand-50 px-3 py-1 text-xs font-semibold text-brand-700">
+              {readySources} of 3 ready
+            </span>
+          )}
+        </div>
 
-        {/* Pitch Deck */}
         <SourceCard
           icon={<FileText className="h-5 w-5" />}
           title="Pitch Deck"
-          description="Company pitch deck or investor presentation"
+          description="Investor presentation or company overview PDF"
           status={sources.pitchDeck.status}
-          detail={sources.pitchDeck.file ? `${sources.pitchDeck.file.name} (${(sources.pitchDeck.file.size / 1024).toFixed(0)} KB)` : undefined}
+          detail={sources.pitchDeck.file?.name}
+          fileSize={sources.pitchDeck.file?.size}
+          onClear={clearPitchDeck}
         >
-          <div
-            onClick={() => pitchRef.current?.click()}
-            onDragOver={(e) => e.preventDefault()}
-            onDrop={(e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) handlePitchDeck(f); }}
-            className="cursor-pointer rounded-lg border-2 border-dashed border-slate-300 px-4 py-6 text-center transition-colors hover:border-brand-400 hover:bg-brand-50/30"
-          >
-            <Upload className="mx-auto mb-2 h-6 w-6 text-slate-400" />
-            <p className="text-sm text-slate-600">Drop PDF here or click to browse</p>
-            <input ref={pitchRef} type="file" accept=".pdf" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) handlePitchDeck(f); e.target.value = ""; }} />
-          </div>
+          <DropZone
+            inputRef={pitchRef}
+            onFile={handlePitchDeck}
+            label="Drop your pitch deck here, or click to browse"
+          />
         </SourceCard>
 
-        {/* GitHub */}
         <SourceCard
           icon={<Github className="h-5 w-5" />}
-          title="GitHub Repository"
-          description="Public GitHub organization URL"
+          title="GitHub Organization"
+          description="Public GitHub organization URL for code analysis"
           status={sources.github.status}
           detail={sources.github.status === "ready" ? sources.github.url : undefined}
         >
@@ -126,42 +143,41 @@ export default function SubmitPage() {
             value={sources.github.url}
             onChange={(e) => handleGithubUrl(e.target.value)}
             placeholder="https://github.com/org-name"
-            className="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm text-slate-900 placeholder-slate-400 focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+            className="input-field"
           />
           {sources.github.status === "entered" && sources.github.url.trim() && (
-            <p className="mt-1 text-xs text-amber-600">Enter a valid GitHub URL (https://github.com/...)</p>
+            <p className="mt-2 text-xs text-amber-600">Please enter a valid GitHub URL</p>
           )}
         </SourceCard>
 
-        {/* SOC-2 */}
         <SourceCard
           icon={<ShieldCheck className="h-5 w-5" />}
           title="SOC-2 Report"
-          description="SOC-2 Type II audit report"
+          description="SOC-2 Type II audit report PDF"
           status={sources.soc2.status}
-          detail={sources.soc2.file ? `${sources.soc2.file.name} (${(sources.soc2.file.size / 1024).toFixed(0)} KB)` : undefined}
+          detail={sources.soc2.file?.name}
+          fileSize={sources.soc2.file?.size}
+          onClear={clearSoc2}
         >
-          <div
-            onClick={() => soc2Ref.current?.click()}
-            onDragOver={(e) => e.preventDefault()}
-            onDrop={(e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) handleSoc2(f); }}
-            className="cursor-pointer rounded-lg border-2 border-dashed border-slate-300 px-4 py-6 text-center transition-colors hover:border-brand-400 hover:bg-brand-50/30"
-          >
-            <Upload className="mx-auto mb-2 h-6 w-6 text-slate-400" />
-            <p className="text-sm text-slate-600">Drop PDF here or click to browse</p>
-            <input ref={soc2Ref} type="file" accept=".pdf" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleSoc2(f); e.target.value = ""; }} />
-          </div>
+          <DropZone
+            inputRef={soc2Ref}
+            onFile={handleSoc2}
+            label="Drop your SOC-2 report here, or click to browse"
+          />
         </SourceCard>
       </div>
 
       {error && (
-        <div className="mb-4 flex items-center gap-2 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">
+        <div className="mb-6 flex items-center gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
           <AlertCircle className="h-4 w-4 flex-shrink-0" />
-          {error}
+          <span className="flex-1">{error}</span>
+          <button onClick={() => setError(null)} className="text-red-400 hover:text-red-600">
+            <X className="h-4 w-4" />
+          </button>
         </div>
       )}
 
-      <button onClick={handleSubmit} disabled={!canSubmit} className="btn-primary w-full text-base">
+      <button onClick={handleSubmit} disabled={!canSubmit} className="btn-primary w-full py-4 text-base">
         {submitting ? (
           <>
             <Loader2 className="h-5 w-5 animate-spin" />
@@ -169,45 +185,117 @@ export default function SubmitPage() {
           </>
         ) : (
           <>
-            Analyze
+            Start Risk Analysis
             <ArrowRight className="h-5 w-5" />
           </>
         )}
       </button>
 
       {!hasAnySrc && (
-        <p className="mt-3 text-center text-xs text-slate-400">Provide at least one source to continue</p>
+        <p className="mt-4 text-center text-sm text-slate-400">
+          Provide at least one data source to continue
+        </p>
       )}
     </div>
   );
 }
 
 function SourceCard({
-  icon, title, description, status, detail, children,
+  icon, title, description, status, detail, fileSize, onClear, children,
 }: {
   icon: React.ReactNode; title: string; description: string;
-  status: SourceStatus; detail?: string; children: React.ReactNode;
+  status: SourceStatus; detail?: string; fileSize?: number;
+  onClear?: () => void; children: React.ReactNode;
 }) {
   const ready = status === "ready";
   return (
-    <div className={`rounded-xl border bg-white p-5 shadow-sm transition-all ${ready ? "border-emerald-300 ring-1 ring-emerald-100" : "border-slate-200"}`}>
-      <div className="mb-3 flex items-center justify-between">
+    <div className={`rounded-2xl border bg-white p-5 transition-all duration-200 ${
+      ready
+        ? "border-brand-200 shadow-card"
+        : "border-slate-200/80 shadow-card hover:shadow-card-hover"
+    }`}>
+      <div className="mb-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className={`rounded-lg p-2 ${ready ? "bg-emerald-50 text-emerald-600" : "bg-slate-100 text-slate-500"}`}>
+          <div className={`flex h-10 w-10 items-center justify-center rounded-xl ${
+            ready ? "bg-brand-50 text-brand-600" : "bg-slate-50 text-slate-400"
+          }`}>
             {icon}
           </div>
           <div>
-            <h3 className="text-sm font-semibold text-slate-900">{title}</h3>
-            <p className="text-xs text-slate-500">{description}</p>
+            <h3 className="text-sm font-semibold text-navy-900">{title}</h3>
+            <p className="text-xs text-slate-400">{description}</p>
           </div>
         </div>
-        {ready && <CheckCircle2 className="h-5 w-5 text-emerald-500" />}
+        {ready && (
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="h-5 w-5 text-brand-500" />
+            {onClear && (
+              <button
+                onClick={onClear}
+                className="rounded-lg p-1 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
+          </div>
+        )}
       </div>
       {ready && detail ? (
-        <div className="rounded-lg bg-emerald-50/50 px-3 py-2 text-sm text-emerald-700">{detail}</div>
+        <div className="rounded-xl bg-brand-50/60 px-4 py-3">
+          <p className="text-sm font-medium text-brand-800">{detail}</p>
+          {fileSize && (
+            <p className="mt-0.5 text-xs text-brand-600">
+              {(fileSize / 1024).toFixed(0)} KB
+            </p>
+          )}
+        </div>
       ) : (
         children
       )}
+    </div>
+  );
+}
+
+function DropZone({
+  inputRef, onFile, label,
+}: {
+  inputRef: React.RefObject<HTMLInputElement>;
+  onFile: (f: File) => void;
+  label: string;
+}) {
+  const [dragging, setDragging] = useState(false);
+
+  return (
+    <div
+      onClick={() => inputRef.current?.click()}
+      onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+      onDragLeave={() => setDragging(false)}
+      onDrop={(e) => {
+        e.preventDefault();
+        setDragging(false);
+        const f = e.dataTransfer.files[0];
+        if (f) onFile(f);
+      }}
+      className={`cursor-pointer rounded-xl border-2 border-dashed px-4 py-8 text-center transition-all duration-200 ${
+        dragging
+          ? "border-brand-400 bg-brand-50/40"
+          : "border-slate-200 hover:border-brand-300 hover:bg-slate-50/50"
+      }`}
+    >
+      <Upload className={`mx-auto mb-3 h-8 w-8 ${dragging ? "text-brand-500" : "text-slate-300"}`} />
+      <p className="text-sm text-slate-500">{label}</p>
+      <p className="mt-1 text-xs text-slate-400">PDF files only</p>
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".pdf"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) onFile(f);
+          e.target.value = "";
+        }}
+      />
     </div>
   );
 }

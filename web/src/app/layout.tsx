@@ -3,19 +3,23 @@ import { Inter } from "next/font/google";
 import "./globals.css";
 import NavBar from "@/components/NavBar";
 
-const inter = Inter({ subsets: ["latin"] });
+const inter = Inter({
+  subsets: ["latin"],
+  display: "swap",
+  variable: "--font-inter",
+});
 
 export const metadata: Metadata = {
-  title: "Hammurabi — Underwriting Platform",
-  description: "AI-powered underwriting engine for startup risk assessment",
+  title: "Solon — Underwriting Platform",
+  description: "AI-powered risk engine for startup underwriting",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" className={inter.variable}>
       <body className={inter.className}>
         <NavBar />
-        <main className="min-h-[calc(100vh-3.5rem)]">{children}</main>
+        <main className="min-h-[calc(100vh-4rem)]">{children}</main>
       </body>
     </html>
   );

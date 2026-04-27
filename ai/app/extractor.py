@@ -120,7 +120,6 @@ async def _extract_page(
     Returns (parsed_result_or_None, cost_info_dict).
     """
     b64 = _image_to_base64(img)
-    oai = _get_client()
 
     # #6: Use low detail for text-heavy pages, high for image-heavy
     detail = "low" if len(text.strip()) > _TEXT_THRESHOLD_FOR_LOW_DETAIL else "high"

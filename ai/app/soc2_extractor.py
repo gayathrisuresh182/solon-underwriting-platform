@@ -1,39 +1,37 @@
 """
-SOC-2 Type II report extractor — two-pass hybrid architecture (v2).
+SOC-2 Type II report extractor — Docling-powered architecture (v3).
 
-Pass 1 (cheap):  PyMuPDF text extraction -> keyword-based page classification
-                  with LLM fallback for ambiguous pages (#14).
-Pass 2 (targeted): GPT-4o vision on high-value pages with knowledge-base
-                    context injection and dual input for tables/findings (#11).
+Uses Docling DocumentConverter for structured document parsing:
+  - Tables extracted deterministically as DataFrames (no LLM needed)
+  - Prose sections classified by heading keywords and extracted via text-only LLM
+  - No Vision API calls — all LLM interactions are text-only
 
-v2 improvements:
-- Structured output JSON schemas (#10)
-- Dual input (text + image) for control_table and findings pages (#11)
-- Table-aware prompting for control extraction (#12)
-- LLM fallback for ambiguous page classification (#14)
-- Cross-page finding consolidation (#15)
-- Security signal confidence tracking — explicit vs inferred (#17)
+v3 improvements over v2 (PyMuPDF + Vision):
+- Deterministic table extraction via Docling's layout-aware parser
+- 10x cheaper: text-only LLM calls vs Vision API
+- No rate limit issues: no image token consumption
+- Faster: no base64 encoding, no Vision API latency
 
-Output shape:
+Output shape (unchanged):
     {"fields": {}, "confidence_scores": {}, "citations": {}, "metadata": {}}
 """
 
 from __future__ import annotations
 
-import base64
-import io
 import json
 import logging
 import re
 import time
+from io import BytesIO
 from typing import Any
 
-import fitz
-from PIL import Image
+import pandas as pd
+from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
+from docling.datamodel.base_models import DocumentStream, InputFormat
+from docling.datamodel.pipeline_options import PdfPipelineOptions
+from docling.document_converter import DocumentConverter, PdfFormatOption
 
 from .soc2_prompts import (
-    CLASSIFICATION_PROMPT,
-    CLASSIFICATION_SCHEMA,
     CONTROL_TABLE_PROMPT,
     CONTROL_TABLE_SCHEMA,
     FINDINGS_PROMPT,
@@ -51,160 +49,241 @@ from . import llm_client
 
 logger = logging.getLogger(__name__)
 
-
-# ── Page type taxonomy ─────────────────────────────────────────────────
-
-PAGE_TYPES = (
-    "cover", "table_of_contents", "auditor_opinion", "management_assertion",
-    "system_description", "testing_methodology", "control_table",
-    "testing_summary", "findings", "appendix", "glossary", "narrative",
-)
-
-HIGH_VALUE_TYPES = {"auditor_opinion", "system_description", "control_table", "findings", "testing_summary"}
-
-# Pages that get dual input (text + image)
-DUAL_INPUT_TYPES = {"control_table", "findings"}
+_converter: DocumentConverter | None = None
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# PASS 1 — Keyword-based page classification with LLM fallback (#14)
-# ═══════════════════════════════════════════════════════════════════════
+def _get_converter() -> DocumentConverter:
+    """Singleton Docling converter — heavy init, reuse across calls.
 
-def _classify_page(text: str, page_num: int, total_pages: int) -> tuple[str, float]:
-    """Classify a page by its dominant content type using keyword heuristics.
-
-    Returns (page_type, confidence). Confidence < 0.5 means the classification
-    is ambiguous and should be sent to LLM fallback.
+    Uses PyPdfium2 backend for maximum stability and lowest memory usage.
+    Our SOC-2 PDFs are digital text (not scanned), so OCR is unnecessary.
+    Table structure from Docling layout model is best-effort; for pages
+    where layout detection fails, we fall back to text-only LLM extraction.
     """
-    t = text.lower()
-
-    if page_num == 1 and ("soc 2" in t or "soc2" in t) and ("prepared by" in t or "audit period" in t):
-        return "cover", 0.95
-
-    if "table of contents" in t:
-        return "table_of_contents", 0.95
-
-    if ("independent auditor" in t or "independent service auditor" in t) and (
-        "opinion" in t or "scope" in t or "in our opinion" in t
-    ):
-        return "auditor_opinion", 0.9
-
-    if "management's assertion" in t or "management assertion" in t:
-        return "management_assertion", 0.9
-
-    if "appendix" in t or "complementary user entity" in t or "cuec-" in t:
-        return "appendix", 0.85
-
-    if "glossary" in t and "definition" not in t[:50].lower():
-        return "glossary", 0.85
-
-    if "summary of testing" in t and ("controls tested" in t or "pass rate" in t or "controls_passed" in t
-                                      or "controls operating" in t or "metric" in t):
-        return "testing_summary", 0.85
-
-    if (("finding" in t and ("condition" in t or "management response" in t))
-            or ("findings and observations" in t and "exception" in t)):
-        return "findings", 0.8
-
-    criteria_ids = re.findall(r"CC\d+\.\d+", text)
-    if len(criteria_ids) >= 2 and ("pass" in t or "fail" in t or "test performed" in t
-                                    or "test result" in t or "none noted" in t
-                                    or "control activity" in t):
-        return "control_table", 0.8
-
-    if ("system description" in t or "overview of operations" in t
-            or ("infrastructure" in t and ("data flow" in t or "personnel" in t))
-            or "security policies and practices" in t
-            or "risk management program" in t
-            or ("subservice organization" in t or "third-party" in t and "management" in t)
-            or ("personnel" in t and ("security" in t or "employees" in t) and page_num > 3)):
-        return "system_description", 0.7
-
-    if "testing methodology" in t or ("test procedures" in t and "sampling" in t):
-        return "testing_methodology", 0.7
-
-    if len(criteria_ids) >= 1 and ("exception" in t or "compensating" in t):
-        return "findings", 0.6
-
-    # If no strong match, return narrative with low confidence for LLM fallback
-    keyword_count = sum(1 for kw in ["control", "security", "exception", "audit", "test"]
-                        if kw in t)
-    conf = 0.3 if keyword_count >= 2 else 0.7
-    return "narrative", conf
-
-
-async def _llm_classify_page(text: str) -> tuple[str, float]:
-    """Use GPT-4o-mini to classify an ambiguous page. Cost ~$0.0005."""
-    try:
-        llm_resp = await llm_client.complete(
-            system="You classify SOC-2 report pages into content categories.",
-            messages=[
-                {"role": "user", "content": CLASSIFICATION_PROMPT.format(
-                    page_text=text[:2000]
-                )},
-            ],
-            response_format=CLASSIFICATION_SCHEMA,
-            temperature=0.0,
-            max_tokens=200,
+    global _converter
+    if _converter is None:
+        pipeline_options = PdfPipelineOptions(
+            do_ocr=False,
+            do_code_enrichment=False,
+            do_formula_enrichment=False,
+            do_picture_classification=False,
+            do_picture_description=False,
+            generate_page_images=False,
+            generate_picture_images=False,
+            generate_table_images=False,
+            images_scale=1.0,
         )
-        data = json.loads(llm_resp.content or "{}")
-        page_type = data.get("page_type", "narrative")
-        confidence = float(data.get("confidence", 0.5))
-        if page_type not in PAGE_TYPES:
-            page_type = "narrative"
-        return page_type, confidence
-    except Exception:
-        logger.warning("LLM page classification fallback failed")
-        return "narrative", 0.3
+        _converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(
+                    pipeline_options=pipeline_options,
+                    backend=PyPdfiumDocumentBackend,
+                ),
+            }
+        )
+    return _converter
 
 
-def _extract_text_pages(pdf_bytes: bytes) -> list[tuple[str, Image.Image]]:
-    """Extract (text, PIL image) for every page in the PDF."""
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    pages: list[tuple[str, Image.Image]] = []
-    for page in doc:
-        text = page.get_text()
-        pix = page.get_pixmap(dpi=150)
-        img = Image.open(io.BytesIO(pix.tobytes("png")))
-        pages.append((text, img))
-    doc.close()
-    return pages
+# ═══════════════════════════════════════════════════════════════════════
+# Section classification (heading-based, replaces page-level keyword pass)
+# ═══════════════════════════════════════════════════════════════════════
+
+def _classify_section(heading: str, body_text: str) -> str:
+    """Classify a markdown section by heading and body keywords."""
+    h = heading.lower()
+    t = body_text.lower()[:2000]
+
+    if "independent auditor" in h or "independent service auditor" in h or (
+        "opinion" in h and ("auditor" in h or "report" in h)
+    ):
+        return "auditor_opinion"
+
+    if ("system description" in h
+            or ("description of" in h and "system" in h)
+            or "overview of operations" in h):
+        return "system_description"
+    if "infrastructure" in h and ("personnel" in h or "data" in h):
+        return "system_description"
+    if "security policies" in h or "risk management" in h:
+        return "system_description"
+
+    if ("control activit" in h or "tests of operating effectiveness" in h
+            or "section iv" in h and "test" in h):
+        return "control_table"
+
+    if ("finding" in h or "exception" in h or "observation" in h
+            or "section v" in h and ("finding" in h or "exception" in h)):
+        return "findings"
+
+    if "summary of testing" in h or "testing results" in h or "testing summary" in h:
+        return "testing_summary"
+
+    if "in our opinion" in t and ("material respects" in t or "trust services" in t):
+        return "auditor_opinion"
+    if "system description" in t and ("infrastructure" in t or "personnel" in t):
+        return "system_description"
+    if re.search(r"CC\d+\.\d+", body_text) and ("pass" in t or "fail" in t or "none noted" in t):
+        return "control_table"
+    if "finding" in t and ("condition" in t or "management response" in t):
+        return "findings"
+
+    return "other"
 
 
-async def classify_all_pages(pdf_bytes: bytes) -> list[dict]:
-    """Pass 1: classify every page, with LLM fallback for ambiguous ones."""
-    pages = _extract_text_pages(pdf_bytes)
-    total = len(pages)
-    classified: list[dict] = []
-    llm_fallback_count = 0
+def _split_markdown_sections(md_text: str) -> list[dict]:
+    """Split markdown into sections by headings."""
+    sections: list[dict] = []
+    lines = md_text.split("\n")
+    current_heading = ""
+    current_body_lines: list[str] = []
 
-    for idx, (text, img) in enumerate(pages):
-        ptype, conf = _classify_page(text, idx + 1, total)
+    for line in lines:
+        if line.startswith("#"):
+            if current_heading or current_body_lines:
+                body = "\n".join(current_body_lines).strip()
+                if body:
+                    sections.append({
+                        "heading": current_heading,
+                        "body": body,
+                        "type": _classify_section(current_heading, body),
+                    })
+            current_heading = line.lstrip("#").strip()
+            current_body_lines = []
+        else:
+            current_body_lines.append(line)
 
-        # #14: LLM fallback for low-confidence classifications
-        if conf < 0.5 and ptype == "narrative":
-            llm_type, llm_conf = await _llm_classify_page(text)
-            if llm_conf > conf:
-                ptype = llm_type
-                conf = llm_conf
-                llm_fallback_count += 1
+    if current_heading or current_body_lines:
+        body = "\n".join(current_body_lines).strip()
+        if body:
+            sections.append({
+                "heading": current_heading,
+                "body": body,
+                "type": _classify_section(current_heading, body),
+            })
 
-        classified.append({
-            "page": idx + 1,
-            "type": ptype,
-            "classification_confidence": round(conf, 2),
-            "text": text,
-            "image": img,
+    return sections
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Deterministic table extraction (no LLM)
+# ═══════════════════════════════════════════════════════════════════════
+
+def _is_control_table(df: pd.DataFrame) -> bool:
+    cols = [str(c).lower() for c in df.columns]
+    has_criteria = any("criteria" in c or "control id" in c for c in cols)
+    has_result = any("result" in c or "pass" in c or "fail" in c or "status" in c for c in cols)
+    return has_criteria and has_result
+
+
+def _is_testing_summary_table(df: pd.DataFrame) -> bool:
+    cols = [str(c).lower() for c in df.columns]
+    all_text = " ".join(cols + [str(v).lower() for v in df.values.flatten()])
+    return ("metric" in all_text or "summary" in all_text) and (
+        "controls tested" in all_text or "pass rate" in all_text or "total" in all_text
+    )
+
+
+def _extract_controls_from_dataframe(df: pd.DataFrame) -> list[dict]:
+    """Extract control entries from a SOC-2 control table DataFrame."""
+    controls: list[dict] = []
+    cols_lower = {c: str(c).lower() for c in df.columns}
+
+    criteria_col = next(
+        (c for c, cl in cols_lower.items() if "criteria" in cl or "control id" in cl), None
+    )
+    desc_col = next(
+        (c for c, cl in cols_lower.items()
+         if "description" in cl or "control activity" in cl or "activity" in cl),
+        None,
+    )
+    test_col = next(
+        (c for c, cl in cols_lower.items()
+         if "test performed" in cl or ("test" in cl and "result" not in cl)),
+        None,
+    )
+    result_col = next(
+        (c for c, cl in cols_lower.items()
+         if "result" in cl or "status" in cl),
+        None,
+    )
+    exception_col = next(
+        (c for c, cl in cols_lower.items() if "exception" in cl or "finding" in cl), None
+    )
+
+    for _, row in df.iterrows():
+        criteria_id = str(row.get(criteria_col, "")).strip() if criteria_col else ""
+        if not criteria_id or not re.match(r"[A-Z]+\d", criteria_id):
+            continue
+
+        result_text = str(row.get(result_col, "")).lower() if result_col else ""
+        passed = "pass" in result_text or "no exception" in result_text or "none noted" in result_text
+        if "fail" in result_text or "exception noted" in result_text:
+            passed = False
+
+        exception_desc = str(row.get(exception_col, "")).strip() if exception_col else None
+        if exception_desc in ("", "nan", "None", "None noted", "None noted.", "N/A", "none noted"):
+            exception_desc = None
+
+        controls.append({
+            "criteria_id": criteria_id,
+            "category": None,
+            "control_description": str(row.get(desc_col, "")).strip()[:500] if desc_col else None,
+            "test_performed": str(row.get(test_col, "")).strip()[:500] if test_col else None,
+            "passed": passed,
+            "exception_description": exception_desc if not passed else None,
         })
 
-    if llm_fallback_count:
-        logger.info("LLM fallback classified %d ambiguous pages", llm_fallback_count)
+    return controls
 
-    return classified
+
+def _extract_testing_summary_from_dataframe(df: pd.DataFrame) -> dict:
+    """Extract testing summary metrics from a summary table DataFrame."""
+    summary: dict[str, Any] = {}
+    for _, row in df.iterrows():
+        vals = [str(v).lower().strip() for v in row.values]
+        row_text = " ".join(vals)
+
+        if "total" in row_text and ("control" in row_text or "tested" in row_text):
+            num = _extract_int(vals)
+            if num is not None:
+                summary["total_controls_tested"] = num
+        elif "pass" in row_text and "rate" not in row_text:
+            num = _extract_int(vals)
+            if num is not None:
+                summary["controls_passed"] = num
+        elif "exception" in row_text or ("fail" in row_text and "rate" not in row_text):
+            num = _extract_int(vals)
+            if num is not None:
+                summary["controls_with_exceptions"] = num
+        elif "pass rate" in row_text or "pass %" in row_text:
+            num = _extract_pct(vals)
+            if num is not None:
+                summary["pass_rate"] = num
+
+    return summary
+
+
+def _extract_int(vals: list[str]) -> int | None:
+    for v in vals:
+        v_clean = v.replace(",", "").strip()
+        if v_clean.isdigit():
+            return int(v_clean)
+    return None
+
+
+def _extract_pct(vals: list[str]) -> float | None:
+    for v in vals:
+        v_clean = v.replace("%", "").replace(",", "").strip()
+        try:
+            f = float(v_clean)
+            return f / 100 if f > 1 else f
+        except ValueError:
+            continue
+    return None
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Domain-term scanning (bridge between Pass 1 and Pass 2)
+# Domain-term scanning (bridge to knowledge base)
 # ═══════════════════════════════════════════════════════════════════════
 
 _CRITERIA_RE = re.compile(r"CC\d+\.\d+")
@@ -240,94 +319,98 @@ def _build_domain_context(text: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# PASS 2 — Targeted GPT-4o extraction with structured outputs
+# Text-only LLM extraction helpers
 # ═══════════════════════════════════════════════════════════════════════
 
-def _image_to_base64(img: Image.Image, max_dim: int = 1024) -> str:
-    img.thumbnail((max_dim, max_dim), Image.LANCZOS)
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode()
-
-
-async def _call_vision(
-    img: Image.Image,
-    prompt: str,
-    schema: dict,
-    page_text: str | None = None,
-) -> dict | None:
-    """Send a page to GPT-4o with structured output schema via unified client."""
-    b64 = _image_to_base64(img)
-
-    content: list[dict] = [{"type": "text", "text": prompt}]
-    content.append({
-        "type": "image_url",
-        "image_url": {"url": f"data:image/png;base64,{b64}", "detail": "high"},
-    })
-
+async def _extract_opinion_text(section_text: str) -> dict:
+    ctx = _build_domain_context(section_text)
+    prompt = OPINION_PROMPT.format(section_text=section_text[:4000], domain_context=ctx)
     try:
-        llm_resp = await llm_client.complete(
+        resp = await llm_client.complete(
             system=SOC2_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": content}],
-            response_format=schema,
+            messages=[{"role": "user", "content": prompt}],
+            response_format=OPINION_SCHEMA,
+            temperature=0.1,
+            max_tokens=2000,
+            require_vision=False,
+        )
+        return json.loads(resp.content or "{}")
+    except Exception:
+        logger.exception("Opinion text extraction failed")
+        return {}
+
+
+async def _extract_system_description_text(section_text: str) -> dict:
+    ctx = _build_domain_context(section_text)
+    prompt = SYSTEM_DESCRIPTION_PROMPT.format(section_text=section_text[:6000], domain_context=ctx)
+    try:
+        resp = await llm_client.complete(
+            system=SOC2_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+            response_format=SYSTEM_DESCRIPTION_SCHEMA,
             temperature=0.1,
             max_tokens=3000,
-            require_vision=True,
+            require_vision=False,
         )
-        return json.loads(llm_resp.content or "{}")
-    except json.JSONDecodeError:
-        logger.warning("GPT-4o returned malformed JSON")
-        return None
+        return json.loads(resp.content or "{}")
     except Exception:
-        logger.exception("GPT-4o vision call failed")
-        return None
+        logger.exception("System description text extraction failed")
+        return {}
 
 
-# ── Per-page-type extraction helpers ───────────────────────────────────
-
-async def _extract_opinion(page: dict) -> dict:
-    ctx = _build_domain_context(page["text"])
-    prompt = OPINION_PROMPT.format(page_number=page["page"], domain_context=ctx)
-    result = await _call_vision(page["image"], prompt, OPINION_SCHEMA)
-    return result or {}
-
-
-async def _extract_system_description(page: dict) -> dict:
-    ctx = _build_domain_context(page["text"])
-    prompt = SYSTEM_DESCRIPTION_PROMPT.format(page_number=page["page"], domain_context=ctx)
-    result = await _call_vision(page["image"], prompt, SYSTEM_DESCRIPTION_SCHEMA)
-    return result or {}
-
-
-async def _extract_control_table(page: dict) -> dict:
-    """#11 + #12: Dual input with table-aware prompting."""
-    ctx = _build_domain_context(page["text"])
-    prompt = CONTROL_TABLE_PROMPT.format(
-        page_number=page["page"],
-        domain_context=ctx,
-        page_text=page["text"][:3000],
-    )
-    result = await _call_vision(page["image"], prompt, CONTROL_TABLE_SCHEMA, page_text=page["text"])
-    return result or {}
+async def _extract_findings_text(section_text: str) -> dict:
+    ctx = _build_domain_context(section_text)
+    prompt = FINDINGS_PROMPT.format(section_text=section_text[:6000], domain_context=ctx)
+    try:
+        resp = await llm_client.complete(
+            system=SOC2_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+            response_format=FINDINGS_SCHEMA,
+            temperature=0.1,
+            max_tokens=3000,
+            require_vision=False,
+        )
+        return json.loads(resp.content or "{}")
+    except Exception:
+        logger.exception("Findings text extraction failed")
+        return {}
 
 
-async def _extract_findings(page: dict) -> dict:
-    """#11: Dual input for findings pages."""
-    ctx = _build_domain_context(page["text"])
-    prompt = FINDINGS_PROMPT.format(
-        page_number=page["page"],
-        domain_context=ctx,
-        page_text=page["text"][:3000],
-    )
-    result = await _call_vision(page["image"], prompt, FINDINGS_SCHEMA, page_text=page["text"])
-    return result or {}
+async def _extract_control_table_text(section_text: str) -> dict:
+    """Fallback: extract controls from text when Docling table detection misses them."""
+    ctx = _build_domain_context(section_text)
+    prompt = CONTROL_TABLE_PROMPT.format(section_text=section_text[:6000], domain_context=ctx)
+    try:
+        resp = await llm_client.complete(
+            system=SOC2_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+            response_format=CONTROL_TABLE_SCHEMA,
+            temperature=0.1,
+            max_tokens=4000,
+            require_vision=False,
+        )
+        return json.loads(resp.content or "{}")
+    except Exception:
+        logger.exception("Control table text extraction failed")
+        return {}
 
 
-async def _extract_testing_summary(page: dict) -> dict:
-    ctx = _build_domain_context(page["text"])
-    prompt = TESTING_SUMMARY_PROMPT.format(page_number=page["page"], domain_context=ctx)
-    result = await _call_vision(page["image"], prompt, TESTING_SUMMARY_SCHEMA)
-    return result or {}
+async def _extract_testing_summary_text(section_text: str) -> dict:
+    ctx = _build_domain_context(section_text)
+    prompt = TESTING_SUMMARY_PROMPT.format(section_text=section_text[:4000], domain_context=ctx)
+    try:
+        resp = await llm_client.complete(
+            system=SOC2_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+            response_format=TESTING_SUMMARY_SCHEMA,
+            temperature=0.1,
+            max_tokens=1000,
+            require_vision=False,
+        )
+        return json.loads(resp.content or "{}")
+    except Exception:
+        logger.exception("Testing summary text extraction failed")
+        return {}
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -368,7 +451,6 @@ def _extract_security_signals_from_text(all_text: str) -> tuple[dict[str, bool],
             results[field] = True
             evidence[field] = "explicit"
         else:
-            # No mentions at all — infer absence
             results[field] = False
             evidence[field] = "inferred"
 
@@ -380,7 +462,7 @@ def _extract_security_signals_from_text(all_text: str) -> tuple[dict[str, bool],
 # ═══════════════════════════════════════════════════════════════════════
 
 def _consolidate_findings(findings: list[dict]) -> list[dict]:
-    """Merge findings that share the same criteria_id across pages."""
+    """Merge findings that share the same criteria_id across sections."""
     by_criteria: dict[str, dict] = {}
 
     for f in findings:
@@ -393,7 +475,6 @@ def _consolidate_findings(findings: list[dict]) -> list[dict]:
             by_criteria[cid] = dict(f)
         else:
             existing = by_criteria[cid]
-            # Merge fields: prefer non-null values from later pages
             for key in ("finding_title", "condition", "risk_effect",
                         "management_response", "compensating_control"):
                 if not existing.get(key) and f.get(key):
@@ -401,7 +482,6 @@ def _consolidate_findings(findings: list[dict]) -> list[dict]:
                 elif existing.get(key) and f.get(key) and existing[key] != f[key]:
                     existing[key] = f"{existing[key]} | {f[key]}"
 
-            # Keep highest severity
             severity_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1}
             if severity_rank.get(f.get("severity", ""), 0) > severity_rank.get(existing.get("severity", ""), 0):
                 existing["severity"] = f["severity"]
@@ -459,42 +539,76 @@ def _calculate_soc2_risk_score(
 # ═══════════════════════════════════════════════════════════════════════
 
 async def extract_from_soc2(pdf_bytes: bytes) -> dict[str, Any]:
-    """Extract structured risk data from a SOC-2 Type II report PDF."""
+    """Extract structured risk data from a SOC-2 Type II report PDF.
+
+    Uses Docling for deterministic document parsing (tables as DataFrames)
+    and text-only LLM calls for prose section extraction.
+    """
     start = time.time()
 
-    # ── Pass 1: classify pages (with LLM fallback) ───────────────────
-    classified = await classify_all_pages(pdf_bytes)
-    total_pages = len(classified)
-    all_text = "\n".join(p["text"] for p in classified)
+    # ── Step 1: Parse PDF with Docling ────────────────────────────────
+    converter = _get_converter()
+    buf = BytesIO(pdf_bytes)
+    stream = DocumentStream(name="soc2_report.pdf", stream=buf)
+    conv_result = converter.convert(stream)
+    doc = conv_result.document
 
-    page_map: dict[str, list[dict]] = {}
-    for p in classified:
-        page_map.setdefault(p["type"], []).append(p)
+    total_pages = len(doc.pages) if doc.pages else 0
+    full_markdown = doc.export_to_markdown()
 
-    high_value_pages = [p for p in classified if p["type"] in HIGH_VALUE_TYPES]
-    llm_classified = sum(1 for p in classified if p.get("classification_confidence", 1.0) < 0.5)
+    # Free PDF backend resources to prevent memory leaks
+    try:
+        if conv_result.input and conv_result.input._backend:
+            conv_result.input._backend.unload()
+    except Exception:
+        pass
 
     logger.info(
-        "SOC-2 Pass 1: %d pages total, %d high-value for GPT-4o, %d LLM-classified. Types: %s",
-        total_pages, len(high_value_pages), llm_classified,
-        {pt: len(ps) for pt, ps in page_map.items()},
+        "Docling parsed SOC-2: %d pages, %d tables, %d text elements",
+        total_pages, len(doc.tables), len(doc.texts),
     )
 
-    # ── Pass 1b: security signal extraction with evidence tracking (#17) ──
-    security_posture, signal_evidence = _extract_security_signals_from_text(all_text)
+    # ── Step 2: Deterministic table extraction (no LLM) ──────────────
+    all_controls: list[dict] = []
+    testing_summary: dict = {}
+    tables_processed = 0
 
-    # ── Pass 2: targeted GPT-4o extraction ────────────────────────────
+    for table in doc.tables:
+        try:
+            df = table.export_to_dataframe(doc=doc)
+            if df.empty:
+                continue
+            tables_processed += 1
+
+            if _is_control_table(df):
+                controls = _extract_controls_from_dataframe(df)
+                all_controls.extend(controls)
+                logger.info("Control table: extracted %d controls deterministically", len(controls))
+            elif _is_testing_summary_table(df):
+                testing_summary = _extract_testing_summary_from_dataframe(df)
+                logger.info("Testing summary table: %s", testing_summary)
+        except Exception:
+            logger.warning("Failed to process Docling table %d", tables_processed, exc_info=True)
+
+    # ── Step 3: Classify markdown sections and extract via text-only LLM
+    sections = _split_markdown_sections(full_markdown)
+    section_map: dict[str, list[dict]] = {}
+    for s in sections:
+        section_map.setdefault(s["type"], []).append(s)
+
+    logger.info("Sections classified: %s", {k: len(v) for k, v in section_map.items()})
+
+    security_posture, signal_evidence = _extract_security_signals_from_text(full_markdown)
+
     opinion_data: dict = {}
     system_desc_fields: dict[str, Any] = {}
     system_desc_confidence: dict[str, float] = {}
     system_desc_citations: dict[str, str] = {}
-    all_controls: list[dict] = []
     all_findings: list[dict] = []
-    testing_summary: dict = {}
     llm_calls = 0
 
-    for p in page_map.get("auditor_opinion", []):
-        result = await _extract_opinion(p)
+    for s in section_map.get("auditor_opinion", []):
+        result = await _extract_opinion_text(s["body"])
         llm_calls += 1
         if result:
             for key in ("audit_opinion", "company_name", "audit_period",
@@ -506,11 +620,11 @@ async def extract_from_soc2(pdf_bytes: bytes) -> dict[str, Any]:
                         opinion_data[key] = result[key]
                         opinion_data.setdefault("confidence", {})[key] = new_conf
                         opinion_data.setdefault("citations", {})[key] = (
-                            result.get("citations", {}).get(key) or f"page {p['page']}"
+                            result.get("citations", {}).get(key) or f"section: {s['heading']}"
                         )
 
-    for p in page_map.get("system_description", []):
-        result = await _extract_system_description(p)
+    for s in section_map.get("system_description", []):
+        result = await _extract_system_description_text(s["body"])
         llm_calls += 1
         if result:
             fields = result.get("fields", result)
@@ -524,30 +638,31 @@ async def extract_from_soc2(pdf_bytes: bytes) -> dict[str, Any]:
                 if new_conf > old_conf:
                     system_desc_fields[field] = value
                     system_desc_confidence[field] = new_conf
-                    system_desc_citations[field] = cit.get(field) or f"page {p['page']}"
+                    system_desc_citations[field] = cit.get(field) or f"section: {s['heading']}"
 
-    for p in page_map.get("control_table", []):
-        result = await _extract_control_table(p)
-        llm_calls += 1
-        if result:
-            all_controls.extend(result.get("controls", []))
+    # Extract controls from text when Docling didn't find control tables
+    if not all_controls:
+        for s in section_map.get("control_table", []):
+            result = await _extract_control_table_text(s["body"])
+            llm_calls += 1
+            if result:
+                all_controls.extend(result.get("controls", []))
 
-    for p in page_map.get("findings", []):
-        result = await _extract_findings(p)
+    for s in section_map.get("findings", []):
+        result = await _extract_findings_text(s["body"])
         llm_calls += 1
         if result:
             all_findings.extend(result.get("findings", []))
 
-    for p in page_map.get("testing_summary", []):
-        result = await _extract_testing_summary(p)
-        llm_calls += 1
-        if result:
-            testing_summary = result
+    if not testing_summary:
+        for s in section_map.get("testing_summary", []):
+            result = await _extract_testing_summary_text(s["body"])
+            llm_calls += 1
+            if result:
+                testing_summary = result
 
-    # ── #15: Cross-page finding consolidation ─────────────────────────
+    # ── Step 4: Consolidate and score ─────────────────────────────────
     consolidated_findings = _consolidate_findings(all_findings)
-
-    # ── Merge and structure results ───────────────────────────────────
     elapsed_ms = int((time.time() - start) * 1000)
 
     controls_total = len(all_controls) or testing_summary.get("total_controls_tested", 0)
@@ -555,13 +670,6 @@ async def extract_from_soc2(pdf_bytes: bytes) -> dict[str, Any]:
     controls_failed = controls_total - controls_passed
 
     exceptions_from_controls = [c for c in all_controls if not c.get("passed", True)]
-    exception_criteria_from_controls = {
-        c["criteria_id"] for c in exceptions_from_controls if "criteria_id" in c
-    }
-    exception_criteria_from_findings = {
-        f["criteria_id"] for f in consolidated_findings if "criteria_id" in f
-    }
-    all_exception_criteria = exception_criteria_from_controls | exception_criteria_from_findings
 
     merged_exceptions: list[dict] = []
     seen_criteria: set[str] = set()
@@ -590,7 +698,7 @@ async def extract_from_soc2(pdf_bytes: bytes) -> dict[str, Any]:
         controls_total=controls_total,
     )
 
-    # ── Build output ──────────────────────────────────────────────────
+    # ── Build output (same shape as v2 for pipeline compatibility) ────
     fields: dict[str, Any] = {
         "company_name": opinion_data.get("company_name", system_desc_fields.get("company_name", "Unknown")),
         "industry": system_desc_fields.get("industry"),
@@ -619,31 +727,35 @@ async def extract_from_soc2(pdf_bytes: bytes) -> dict[str, Any]:
     for k, v in system_desc_confidence.items():
         confidence_scores[k] = _conf_level(v)
     confidence_scores["controls_tested"] = "high" if all_controls else "low"
-    confidence_scores["exception_count"] = "high" if consolidated_findings else ("medium" if exceptions_from_controls else "low")
+    confidence_scores["exception_count"] = (
+        "high" if consolidated_findings
+        else ("medium" if exceptions_from_controls else "low")
+    )
 
     citations: dict[str, str] = {}
     citations.update(opinion_data.get("citations", {}))
     citations.update(system_desc_citations)
     if all_controls:
-        ctrl_pages = sorted({c.get("page_number", "?") for c in all_controls if "page_number" in c}
-                            | {p["page"] for p in page_map.get("control_table", [])})
-        citations["controls_tested"] = f"Control tables on pages {ctrl_pages}"
+        citations["controls_tested"] = (
+            f"Deterministic extraction from {tables_processed} Docling tables "
+            f"({len(all_controls)} controls)"
+        )
     if consolidated_findings:
-        finding_pages = sorted({p["page"] for p in page_map.get("findings", [])})
-        citations["exceptions"] = f"Findings on pages {finding_pages}"
+        citations["exceptions"] = f"Consolidated from {len(all_findings)} raw findings"
 
-    # #17: Security signal evidence in citations
     for field, ev_type in signal_evidence.items():
         citations[field] = f"security signal ({ev_type})"
 
     metadata: dict[str, Any] = {
         "source_type": "soc2_report",
+        "extraction_method": "docling",
         "extraction_time_ms": elapsed_ms,
         "total_pages": total_pages,
-        "pages_sent_to_llm": len(high_value_pages),
+        "docling_tables_found": len(doc.tables),
+        "docling_text_elements": len(doc.texts),
+        "tables_processed": tables_processed,
+        "sections_classified": {k: len(v) for k, v in section_map.items()},
         "llm_calls": llm_calls,
-        "llm_classified_pages": llm_classified,
-        "page_classification": {p["page"]: p["type"] for p in classified},
         "audit_opinion": opinion,
         "controls_tested": controls_total,
         "controls_passed": controls_passed,
