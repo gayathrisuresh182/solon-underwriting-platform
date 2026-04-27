@@ -26,7 +26,7 @@ from temporalio.client import Client
 
 
 def _get_dsn() -> str:
-    return os.environ.get("DATABASE_URL", "postgresql://solon:solon_dev@localhost:5432/solon")
+    return os.environ.get("DATABASE_URL", "postgresql://corgi:corgi_dev@localhost:5432/corgi_demo")
 
 
 def create_submission(company_name: str, sources: list[dict]) -> tuple[str, list[dict]]:

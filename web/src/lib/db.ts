@@ -3,7 +3,7 @@ import { Pool, QueryResultRow } from "pg";
 const pool = new Pool({
   connectionString:
     process.env.DATABASE_URL ||
-    "postgresql://solon:solon_dev@localhost:5432/solon",
+    "postgresql://corgi:corgi_dev@localhost:5432/corgi_demo",
   max: 10,
 });
 

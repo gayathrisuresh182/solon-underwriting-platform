@@ -1,34 +1,38 @@
 services:
   postgres:
     image: pgvector/pgvector:pg16
-    container_name: solon-postgres
+    container_name: corgi-postgres
     environment:
-      POSTGRES_USER: solon
-      POSTGRES_PASSWORD: solon_dev
-      POSTGRES_DB: solon
+      POSTGRES_USER: corgi
+      POSTGRES_PASSWORD: corgi_dev
+      POSTGRES_DB: corgi_demo
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./db/init.sql:/docker-entrypoint-initdb.d/001_init.sql
-      - ./db/migrations:/docker-entrypoint-initdb.d/migrations
       - ./db/000_init_temporal_db.sql:/docker-entrypoint-initdb.d/000_init_temporal_db.sql
+      - ./db/init.sql:/docker-entrypoint-initdb.d/001_init.sql
+      # Top-level .sql only — Postgres image does not run scripts nested in subdirs
+      - ./db/migrations/002_pgvector_and_submissions.sql:/docker-entrypoint-initdb.d/002_pgvector_and_submissions.sql
+      - ./db/migrations/003_document_hash.sql:/docker-entrypoint-initdb.d/003_document_hash.sql
+      - ./db/migrations/004_correction_feedback.sql:/docker-entrypoint-initdb.d/004_correction_feedback.sql
+      - ./db/migrations/005_quotes_policies_certificates.sql:/docker-entrypoint-initdb.d/005_quotes_policies_certificates.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U solon"]
+      test: ["CMD-SHELL", "pg_isready -U corgi"]
       interval: 5s
       timeout: 5s
       retries: 5
 
   temporal:
     image: temporalio/auto-setup:latest
-    container_name: solon-temporal
+    container_name: corgi-temporal
     ports:
       - "7233:7233"
     environment:
       - DB=postgres12
       - DB_PORT=5432
-      - POSTGRES_USER=solon
-      - POSTGRES_PWD=solon_dev
+      - POSTGRES_USER=corgi
+      - POSTGRES_PWD=corgi_dev
       - POSTGRES_SEEDS=postgres
       - DBNAME=temporal
       - VISIBILITY_DBNAME=temporal_visibility
@@ -38,7 +42,7 @@ services:
 
   temporal-ui:
     image: temporalio/ui:latest
-    container_name: solon-temporal-ui
+    container_name: corgi-temporal-ui
     ports:
       - "8233:8080"
     environment:

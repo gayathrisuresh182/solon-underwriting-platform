@@ -31,9 +31,9 @@ def _get_dsn() -> str:
     return (
         f"host={os.environ.get('PGHOST', 'localhost')} "
         f"port={os.environ.get('PGPORT', '5432')} "
-        f"dbname={os.environ.get('PGDATABASE', 'solon')} "
-        f"user={os.environ.get('PGUSER', 'solon')} "
-        f"password={os.environ.get('PGPASSWORD', 'solon_dev')}"
+        f"dbname={os.environ.get('PGDATABASE', 'corgi_demo')} "
+        f"user={os.environ.get('PGUSER', 'corgi')} "
+        f"password={os.environ.get('PGPASSWORD', 'corgi_dev')}"
     )
 
 

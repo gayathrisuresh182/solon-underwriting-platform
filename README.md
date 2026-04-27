@@ -18,11 +18,14 @@ Upload startup materials (pitch deck PDF, optional SOC 2 PDF, optional GitHub UR
 docker compose up -d
 ```
 
+On first boot, Postgres runs every `docker-entrypoint-initdb.d/*.sql` in order (`000`…`005`), including `submissions` and related tables. If you ever use an old volume without those tables, apply files under `db/migrations/` manually or recreate the volume (`docker compose down -v` then `up -d`).
+
 ### 2. Configure environment
 
 ```bash
 cp .env.example .env
-# Edit .env: OPENAI_API_KEY, DATABASE_URL if not using defaults
+# Edit .env: OPENAI_API_KEY. Local default DB URL (matches Docker Compose):
+# DATABASE_URL=postgresql://corgi:corgi_dev@localhost:5432/corgi_demo
 ```
 
 ### 3. Start the AI service
