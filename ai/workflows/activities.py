@@ -39,7 +39,7 @@ class ExtractionOutput:
 
 
 def _get_dsn() -> str:
-    return os.environ.get("DATABASE_URL", "postgresql://corgi:corgi_dev@localhost:5432/corgi_demo")
+    return os.environ.get("DATABASE_URL", "postgresql://solon:solon_dev@localhost:5432/solon")
 
 
 def _save_source_result(source_id: str, status: str, result: dict | None, error: str | None = None) -> None:

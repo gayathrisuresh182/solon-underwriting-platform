@@ -15,7 +15,7 @@ from .extractor import extract_from_pdf
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[2] / ".env")
 logging.basicConfig(level=logging.INFO)
 
-app = FastAPI(title="Mini Hammurabi AI Service", version="0.3.0")
+app = FastAPI(title="Solon AI Service", version="0.3.0")
 
 app.add_middleware(
     CORSMiddleware,
